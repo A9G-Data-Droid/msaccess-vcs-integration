@@ -1,4 +1,4 @@
-Version =20
+Version =21
 VersionRequired =20
 Begin Form
     PopUp = NotDefault
@@ -18,9 +18,9 @@ Begin Form
     DatasheetFontHeight =11
     ItemSuffix =20
     Left =4680
-    Top =2430
-    Right =14115
-    Bottom =14175
+    Top =1335
+    Right =22155
+    Bottom =16815
     DatasheetGridlinesColor =14806254
     RecSrcDt = Begin
         0x79e78b777268e540
@@ -33,9 +33,6 @@ Begin Form
     End
     OnLoad ="[Event Procedure]"
     AllowDatasheetView =0
-    AllowPivotTableView =0
-    AllowPivotChartView =0
-    AllowPivotChartView =0
     FilterOnLoad =0
     ShowPageMargins =0
     DisplayOnSharePointSite =1
@@ -1626,7 +1623,7 @@ Option Explicit
 ' Purpose   :
 '---------------------------------------------------------------------------------------
 '
-Private Sub cmdBuild_Click()
+Public Sub cmdBuild_Click()
 
     Dim strFolder As String
     Dim strMsg(0 To 2) As String

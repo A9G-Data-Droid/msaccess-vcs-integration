@@ -1,0 +1,14 @@
+<!-- Default Icons can be used for imageMSO see here: https://bert-toolkit.com/imagemso-list.html-->
+<customUI xmlns="http://schemas.microsoft.com/office/2009/07/customui">
+	<ribbon startFromScratch="false">
+		<tabs>
+			<tab id="VCSRibbon" label="Version Control">
+				<group id="VCSCommands" label="Actions">
+				    <button id="loadGUI" label="Version Control" imageMso="CustomActionsMenu" size="large" onAction="RibbonItemLaunch" tag="Primary"/>
+					<button id="exportSrc" label="Export All Source" imageMso="ExportDBase" size="large" onAction="RibbonItemExport" />
+					<button id="importSrc" label="Compile From Source" imageMso="ImportAccess" size="large" onAction="RibbonItemImport" />
+				</group>
+			</tab>
+		</tabs>
+	</ribbon>
+</customUI>

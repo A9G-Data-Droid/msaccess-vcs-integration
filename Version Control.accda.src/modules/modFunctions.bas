@@ -1056,7 +1056,7 @@ End Function
 Public Function IsLoaded(intType As AcObjectType, strName As String, Optional blnAllowDesignView As Boolean = False) As Boolean
 
     Dim frm As Form
-    Dim ctl As Control
+    Dim ctl As control
     
     If SysCmd(acSysCmdGetObjectState, intType, strName) <> adStateClosed Then
         If blnAllowDesignView Then

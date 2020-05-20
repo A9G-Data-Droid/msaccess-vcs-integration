@@ -2,7 +2,7 @@
   "Info": {
     "Class": "clsDbProperty",
     "Description": "Database Properties (DAO)",
-    "VCS Version": "3.0.84"
+    "VCS Version": "3.0.86"
   },
   "Items": {
     "AccessVersion": {
@@ -42,7 +42,7 @@
       "Type": 10
     },
     "AppVersion": {
-      "Value": "3.0.84",
+      "Value": "3.0.86",
       "Type": 10
     },
     "Auto Compact": {
@@ -65,6 +65,10 @@
       "Value": "",
       "Type": 12
     },
+    "CustomRibbonID": {
+      "Value": "VersionControlTab",
+      "Type": 10
+    },
     "DesignMasterID": {
       "Value": "",
       "Type": 15
@@ -78,11 +82,11 @@
       "Type": 3
     },
     "Last VCS Export": {
-      "Value": "5/20/2020 1:57:57 PM",
+      "Value": "5/20/2020 4:24:06 PM",
       "Type": 10
     },
     "Last VCS Version": {
-      "Value": "3.0.84",
+      "Value": "3.0.86",
       "Type": 10
     },
     "Name": {
@@ -180,6 +184,10 @@
     "Updatable": {
       "Value": true,
       "Type": 1
+    },
+    "Use BigInt for linking and importing data": {
+      "Value": 0,
+      "Type": 4
     },
     "UseAppIconForFrmRpt": {
       "Value": false,

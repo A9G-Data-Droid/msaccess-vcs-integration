@@ -2535,7 +2535,7 @@ End Sub
 Private Function MapControlsToOptions(eAction As eMapAction)
 
     Dim pge As Access.Page
-    Dim ctl As Control
+    Dim ctl As control
     Dim strKey As String
     Dim varItem As Variant
     Dim dTables As Scripting.Dictionary
