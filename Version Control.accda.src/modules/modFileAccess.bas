@@ -29,203 +29,100 @@ Option Private Module
                                        ByVal lpTempFileName As String) As Long
 #End If
 
-' --------------------------------
-' Structures
-' --------------------------------
 
-' Structure to track buffered reading or writing of binary files
-Private Type BinFile
-    file_num As Integer
-    file_len As Long
-    file_pos As Long
-    buffer As String
-    buffer_len As Integer
-    buffer_pos As Integer
-    at_eof As Boolean
-    mode As String
-End Type
+' Cache the Ucs2 requirement for this database
+Private m_blnUcs2 As Boolean
+Private m_strDbPath As String
 
 
-' --------------------------------
-' Basic functions missing from VB 6: buffered file read/write, string builder, encoding check & conversion
-' --------------------------------
+'---------------------------------------------------------------------------------------
+' Procedure : RequiresUcs2
+' Author    : Adam Waller
+' Date      : 5/5/2020
+' Purpose   : Returns true if the current database requires objects to be converted
+'           : to Ucs2 format before importing. (Caching value for subsequent calls.)
+'           : While this involves creating a new querydef object each time, the idea
+'           : is that this would be faster than exporting a form if no queries exist
+'           : in the current database.
+'---------------------------------------------------------------------------------------
+'
+Public Function RequiresUcs2(Optional blnUseCache As Boolean = True) As Boolean
 
-' Open a binary file for reading (mode = 'r') or writing (mode = 'w').
-Private Function BinOpen(file_path As String, mode As String) As BinFile
-
-    Dim f As BinFile
-
-    f.file_num = FreeFile
-    f.mode = LCase(mode)
-    If f.mode = "r" Then
-        Open file_path For Binary Access Read As f.file_num
-        f.file_len = LOF(f.file_num)
-        f.file_pos = 0
-        If f.file_len > &H4000 Then
-            f.buffer = String(&H4000, " ")
-            f.buffer_len = &H4000
+    Dim strTempFile As String
+    Dim frm As Access.Form
+    Dim strName As String
+    Dim dbs As DAO.Database
+    
+    ' See if we already have a cached value
+    If (m_strDbPath <> CurrentProject.FullName) Or Not blnUseCache Then
+    
+        ' Get temp file name
+        strTempFile = GetTempFile
+        
+        ' Can't create querydef objects in ADP databases, so we have to use something else.
+        If CurrentProject.ProjectType = acADP Then
+            ' Create and export a blank form object.
+            ' Turn of screen updates to improve performance and avoid flash.
+            DoCmd.Echo False
+            'strName = "frmTEMP_UCS2_" & Round(Timer)
+            Set frm = Application.CreateForm
+            strName = frm.Name
+            DoCmd.Close acForm, strName, acSaveYes
+            Application.SaveAsText acForm, strName, strTempFile
+            DoCmd.DeleteObject acForm, strName
+            DoCmd.Echo True
         Else
-            f.buffer = String(f.file_len, " ")
-            f.buffer_len = f.file_len
+            ' Standard MDB database.
+            ' Create and export a querydef object. Fast and light.
+            strName = "qryTEMP_UCS2_" & Round(Timer)
+            Set dbs = CurrentDb
+            dbs.CreateQueryDef strName, "SELECT 1"
+            Application.SaveAsText acQuery, strName, strTempFile
+            dbs.QueryDefs.Delete strName
         End If
-        f.buffer_pos = 0
-        Get f.file_num, f.file_pos + 1, f.buffer
-    Else
-        If FSO.FileExists(file_path) Then Kill file_path
-        Open file_path For Binary Access Write As f.file_num
-        f.file_len = 0
-        f.file_pos = 0
-        f.buffer = String(&H4000, " ")
-        f.buffer_len = 0
-        f.buffer_pos = 0
+        
+        ' Test and delete temp file
+        m_strDbPath = CurrentProject.FullName
+        m_blnUcs2 = FileIsUCS2Format(strTempFile)
+        Kill strTempFile
+
     End If
 
-    BinOpen = f
+    ' Return cached value
+    RequiresUcs2 = m_blnUcs2
     
 End Function
-
-
-' Buffered read one byte at a time from a binary file.
-Private Function BinRead(ByRef f As BinFile) As Integer
-
-    If f.at_eof = True Then
-        BinRead = 0
-        Exit Function
-    End If
-
-    BinRead = Asc(Mid(f.buffer, f.buffer_pos + 1, 1))
-
-    f.buffer_pos = f.buffer_pos + 1
-    If f.buffer_pos >= f.buffer_len Then
-        f.file_pos = f.file_pos + &H4000
-        If f.file_pos >= f.file_len Then
-            f.at_eof = True
-            Exit Function
-        End If
-        If f.file_len - f.file_pos > &H4000 Then
-            f.buffer_len = &H4000
-        Else
-            f.buffer_len = f.file_len - f.file_pos
-            f.buffer = String(f.buffer_len, " ")
-        End If
-        f.buffer_pos = 0
-        Get f.file_num, f.file_pos + 1, f.buffer
-    End If
-    
-End Function
-
-
-' Buffered write one byte at a time from a binary file.
-Private Sub BinWrite(ByRef f As BinFile, b As Integer)
-
-    Mid(f.buffer, f.buffer_pos + 1, 1) = Chr(b)
-    f.buffer_pos = f.buffer_pos + 1
-    If f.buffer_pos >= &H4000 Then
-        Put f.file_num, , f.buffer
-        f.buffer_pos = 0
-    End If
-End Sub
-
-
-' Close binary file.
-Private Sub BinClose(ByRef f As BinFile)
-    If f.mode = "w" And f.buffer_pos > 0 Then
-        f.buffer = Left(f.buffer, f.buffer_pos)
-        Put f.file_num, , f.buffer
-    End If
-    Close f.file_num
-End Sub
-
-
-' Binary convert a UCS2-little-endian encoded file to UTF-8.
-Public Sub zConvertUcs2Utf8(Source As String, dest As String)
-
-    Dim f_in As BinFile, f_out As BinFile
-    Dim in_low As Integer, in_high As Integer
-
-    f_in = BinOpen(Source, "r")
-    f_out = BinOpen(dest, "w")
-
-    Do While Not f_in.at_eof
-        in_low = BinRead(f_in)
-        in_high = BinRead(f_in)
-        If in_high = 0 And in_low < &H80 Then
-            ' U+0000 - U+007F   0LLLLLLL
-            BinWrite f_out, in_low
-        ElseIf in_high < &H8 Then
-            ' U+0080 - U+07FF   110HHHLL 10LLLLLL
-            BinWrite f_out, &HC0 + ((in_high And &H7) * &H4) + ((in_low And &HC0) / &H40)
-            BinWrite f_out, &H80 + (in_low And &H3F)
-        Else
-            ' U+0800 - U+FFFF   1110HHHH 10HHHHLL 10LLLLLL
-            BinWrite f_out, &HE0 + ((in_high And &HF0) / &H10)
-            BinWrite f_out, &H80 + ((in_high And &HF) * &H4) + ((in_low And &HC0) / &H40)
-            BinWrite f_out, &H80 + (in_low And &H3F)
-        End If
-    Loop
-
-    BinClose f_in
-    BinClose f_out
-    
-End Sub
-
-'
-'Public Sub ConvertUtf8Ucs2(Source As String, dest As String)
-'    Dim f_in As BinFile, f_out As BinFile
-'    Dim in_1 As Integer, in_2 As Integer, in_3 As Integer
-'
-'    f_in = BinOpen(Source, "r")
-'    f_out = BinOpen(dest, "w")
-'
-'    Do While Not f_in.at_eof
-'        in_1 = BinRead(f_in)
-'        If (in_1 And &H80) = 0 Then
-'            ' U+0000 - U+007F   0LLLLLLL
-'            BinWrite f_out, in_1
-'            BinWrite f_out, 0
-'        ElseIf (in_1 And &HE0) = &HC0 Then
-'            ' U+0080 - U+07FF   110HHHLL 10LLLLLL
-'            in_2 = BinRead(f_in)
-'            BinWrite f_out, ((in_1 And &H3) * &H40) + (in_2 And &H3F)
-'            BinWrite f_out, (in_1 And &H1C) / &H4
-'        Else
-'            ' U+0800 - U+FFFF   1110HHHH 10HHHHLL 10LLLLLL
-'            in_2 = BinRead(f_in)
-'            in_3 = BinRead(f_in)
-'            BinWrite f_out, ((in_2 And &H3) * &H40) + (in_3 And &H3F)
-'            BinWrite f_out, ((in_1 And &HF) * &H10) + ((in_2 And &H3C) / &H4)
-'        End If
-'    Loop
-'
-'    BinClose f_in
-'    BinClose f_out
-'End Sub
-
 
 
 ' Determine if this database imports/exports code as UCS-2-LE. (Older file
 ' formats cause exported objects to use a Windows 8-bit character set.)
-Public Function UsingUcs2() As Boolean
-    Dim obj_name As String, obj_type As Variant, fn As Integer, bytes As String
-    Dim obj_type_split() As String, obj_type_name As String, obj_type_num As Integer
+Public Function UsingUcs2(Optional ByRef appInstance As Application) As Boolean
+    If appInstance Is Nothing Then Set appInstance = Application.Application
+    
+    Dim obj_name As String
+    Dim obj_type As Variant
+    Dim obj_type_split() As String
+    Dim obj_type_name As String
+    Dim obj_type_num As Long
+    Dim thisDb As Database
+    Set thisDb = appInstance.CurrentDb
 
     If CurrentProject.ProjectType = acMDB Then
-        If CurrentDb.QueryDefs.Count > 0 Then
+        If thisDb.QueryDefs.Count > 0 Then
             obj_type_num = acQuery
-            obj_name = CurrentDb.QueryDefs(0).Name
+            obj_name = thisDb.QueryDefs(0).Name
         Else
             For Each obj_type In Split( _
                 "Forms|" & acForm & "," & _
                 "Reports|" & acReport & "," & _
-                "Scripts|" & acMacro & "," & _
-                "Modules|" & acModule _
+                "Scripts|" & acMacro & "," _
             )
                 DoEvents
                 obj_type_split = Split(obj_type, "|")
                 obj_type_name = obj_type_split(0)
                 obj_type_num = Val(obj_type_split(1))
-                If CurrentDb.Containers(obj_type_name).Documents.Count > 0 Then
-                    obj_name = CurrentDb.Containers(obj_type_name).Documents(0).Name
+                If thisDb.Containers(obj_type_name).Documents.Count > 0 Then
+                    obj_name = thisDb.Containers(obj_type_name).Documents(0).Name
                     Exit For
                 End If
             Next
@@ -244,24 +141,21 @@ Public Function UsingUcs2() As Boolean
         End If
     End If
 
+    Dim tempFileName As String: tempFileName = GetTempFile()
+    
     If obj_name = "" Then
-        ' No objects found that can be used to test UCS2 versus UTF-8
-        UsingUcs2 = True
-        Exit Function
+        ' No objects found, make one to test.
+        obj_name = "Temp_Test_Query_Delete_Me"
+        
+        thisDb.CreateQueryDef obj_name, "SELECT * FROM TEST WHERE TESTING=TRUE"
+        appInstance.SaveAsText acQuery, obj_name, tempFileName
+        thisDb.QueryDefs.Delete obj_name
+    Else
+        ' Use found object
+        appInstance.SaveAsText obj_type_num, obj_name, tempFileName
     End If
 
-    Dim tempFileName As String: tempFileName = GetTempFile()
-    Application.SaveAsText obj_type_num, obj_name, tempFileName
-    fn = FreeFile
-    Open tempFileName For Binary Access Read As fn
-    bytes = "  "
-    Get fn, 1, bytes
-    If Asc(Mid(bytes, 1, 1)) = &HFF And Asc(Mid(bytes, 2, 1)) = &HFE Then
-        UsingUcs2 = True
-    Else
-        UsingUcs2 = False
-    End If
-    Close fn
+    UsingUcs2 = FileIsUCS2Format(tempFileName)
     
     FSO.DeleteFile tempFileName
     
@@ -269,34 +163,67 @@ End Function
 
 
 '---------------------------------------------------------------------------------------
+' Procedure : FileIsUCS2Format
+' Author    : Adam Kauffman
+' Date      : 02/24/2020
+' Purpose   : Check the file header for USC-2-LE BOM marker and return true if found.
+'---------------------------------------------------------------------------------------
+'
+Public Function FileIsUCS2Format(ByVal theFilePath As String) As Boolean
+    Dim fileNumber As Integer
+    fileNumber = FreeFile
+    Dim bytes As String
+    bytes = "  "
+    Open theFilePath For Binary Access Read As fileNumber
+    Get fileNumber, 1, bytes
+    Close fileNumber
+    
+    FileIsUCS2Format = (Asc(Mid(bytes, 1, 1)) = &HFF) And (Asc(Mid(bytes, 2, 1)) = &HFE)
+End Function
+
+
+'---------------------------------------------------------------------------------------
 ' Procedure : ConvertUcs2Utf8
 ' Author    : Adam Waller
 ' Date      : 1/23/2019
-' Purpose   : Convert the file to unicode format
+' Purpose   : Convert a UCS2-little-endian encoded file to UTF-8.
 '---------------------------------------------------------------------------------------
 '
 Public Sub ConvertUcs2Utf8(strSourceFile As String, strDestinationFile As String)
 
-    Dim stmNew As New ADODB.Stream
+    Dim stmNew As ADODB.Stream
     Dim strText As String
+
+    ' Make sure the path exists before we write a file.
+    VerifyPath FSO.GetParentFolderName(strDestinationFile)
+
+    ' Check the first couple characters in the file for a UCS BOM.
+    If FileIsUCS2Format(strSourceFile) Then
     
-    ' Read file contents
-    With FSO.OpenTextFile(strSourceFile, , , TristateTrue)
-        strText = .ReadAll
-        .Close
-    End With
-    
-    ' Write as UTF-8
-    With stmNew
-        .Open
-        .Type = adTypeText
-        .Charset = "utf-8"
-        .WriteText strText
-        .SaveToFile strDestinationFile, adSaveCreateOverWrite
-        .Close
-    End With
-    
-    Set stmNew = Nothing
+        ' Read file contents and delete (temp) source file
+        With FSO.OpenTextFile(strSourceFile, , , TristateTrue)
+            strText = .ReadAll
+            .Close
+        End With
+        Kill strSourceFile
+        
+        ' Write as UTF-8
+        Set stmNew = New ADODB.Stream
+        With stmNew
+            .Open
+            .Type = adTypeText
+            .Charset = "utf-8"
+            .WriteText strText
+            .SaveToFile strDestinationFile, adSaveCreateOverWrite
+            .Close
+        End With
+        
+        Set stmNew = Nothing
+    Else
+        ' No conversion needed, move to destination.
+        If FSO.FileExists(strDestinationFile) Then Kill strDestinationFile
+        FSO.MoveFile strSourceFile, strDestinationFile
+    End If
     
 End Sub
 
@@ -305,34 +232,61 @@ End Sub
 ' Procedure : ConvertUtf8Ucs2
 ' Author    : Adam Waller
 ' Date      : 1/24/2019
-' Purpose   : NOT YET WORKING...
+' Purpose   : Convert the file to old UCS-2 unicode format
 '---------------------------------------------------------------------------------------
 '
 Public Sub ConvertUtf8Ucs2(strSourceFile As String, strDestinationFile As String)
 
-    Dim stmNew As New ADODB.Stream
+    Dim stmNew As ADODB.Stream
     Dim strText As String
-    
-    ' Read file contents
-    With FSO.OpenTextFile(strSourceFile, , , TristateTrue)
-        strText = .ReadAll
-        .Close
-    End With
-    
-    ' Write as USC2 LE
-    With stmNew
-        .Open
-        .Type = adTypeText
-        ' Not sure what to use here...
-        .Charset = "utf-8"
-        .WriteText strText
-        .SaveToFile strDestinationFile, adSaveCreateOverWrite
-        .Close
-    End With
-    
-    Set stmNew = Nothing
+
+    If FileIsUCS2Format(strSourceFile) Then
+        ' No conversion needed, send to destination as is
+        FSO.CopyFile strSourceFile, strDestinationFile
+    Else
+        
+        ' Read file contents
+        With FSO.OpenTextFile(strSourceFile, , , TristateFalse)
+            strText = RemoveUTF8BOM(.ReadAll)
+            .Close
+        End With
+        
+        ' Write as UCS-2 LE (BOM)
+        Set stmNew = New ADODB.Stream
+        With stmNew
+            .Open
+            .Type = adTypeText
+            .Charset = "unicode"  ' The original Windows "Unicode" was UCS-2
+            .WriteText strText
+            .SaveToFile strDestinationFile, adSaveCreateOverWrite
+            .Close
+        End With
+        
+        Set stmNew = Nothing
+    End If
     
 End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : RemoveUTF8BOM
+' Author    : Adam Kauffman
+' Date      : 1/24/2019
+' Purpose   : Will remove a UTF8 BOM from the start of the string passed in.
+'---------------------------------------------------------------------------------------
+'
+Public Function RemoveUTF8BOM(ByVal fileContents As String) As String
+    Dim UTF8BOM As String
+    UTF8BOM = Chr(239) & Chr(187) & Chr(191) ' == &HEFBBBF
+    Dim fileBOM As String
+    fileBOM = Left$(fileContents, 3)
+    
+    If fileBOM = UTF8BOM Then
+        RemoveUTF8BOM = Mid$(fileContents, 4)
+    Else ' No BOM detected
+        RemoveUTF8BOM = fileContents
+    End If
+End Function
 
 
 '---------------------------------------------------------------------------------------
