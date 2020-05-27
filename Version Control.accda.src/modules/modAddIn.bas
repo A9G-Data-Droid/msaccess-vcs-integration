@@ -142,7 +142,7 @@ Private Function InstallVCSAddin()
     ' Requires FSO to copy open database files. (VBA.FileCopy give a permission denied error.)
     On Error Resume Next
     FSO.CopyFile strSource, strDest, True
-    If Err Then
+    If Err.Number > 0 Then
         MsgBox2 "Unable to update file", _
             "Encountered error " & Err.Number & ": " & Err.Description & " when copying file.", _
             "Please check to be sure that the following file is not in use:" & vbCrLf & strDest, vbExclamation
@@ -180,7 +180,6 @@ End Function
 Private Function IsAlreadyInstalled() As Boolean
     
     Dim strPath As String
-    Dim oShell As IWshRuntimeLibrary.WshShell
     Dim strTest As String
     
     ' Check for registry key of installed version
@@ -188,17 +187,18 @@ Private Function IsAlreadyInstalled() As Boolean
         
         ' Check for addin file
         If Dir(GetAddinFileName) = CodeProject.Name Then
+            strPath = GetAddinRegPath & "&Version Control\Library"
             
             ' Check HKLM registry key
-            Set oShell = New IWshRuntimeLibrary.WshShell
-            strPath = GetAddinRegPath & "&Version Control\Library"
-            On Error Resume Next
-            ' We should have a value here if the install ran in the past.
-            strTest = oShell.RegRead(strPath)
-            If Err Then Err.Clear
+            With New IWshRuntimeLibrary.WshShell
+                ' We should have a value here if the install ran in the past.
+                On Error Resume Next
+                strTest = .RegRead(strPath)
+            End With
+            
+            If Err.Number > 0 Then Err.Clear
             On Error GoTo 0
-            Set oShell = Nothing
-        
+            
             ' Return our determination
             IsAlreadyInstalled = (strTest <> vbNullString)
         End If
@@ -229,19 +229,15 @@ End Function
 '
 Private Function RegisterMenuItem(strName, Optional strFunction As String = "=LaunchMe()")
 
-    Dim oShell As IWshRuntimeLibrary.WshShell
     Dim strPath As String
-    
-    Set oShell = New IWshRuntimeLibrary.WshShell
     
     ' We need to create/update three registry keys for each item.
     strPath = GetAddinRegPath & strName & "\"
-    With oShell
+    With New IWshRuntimeLibrary.WshShell
         .RegWrite strPath & "Expression", strFunction, "REG_SZ"
         .RegWrite strPath & "Library", GetAddinFileName, "REG_SZ"
         .RegWrite strPath & "Version", 3, "REG_DWORD"
     End With
-    Set oShell = Nothing
     
 End Function
 
@@ -270,6 +266,7 @@ End Sub
 '
 Public Sub Deploy(Optional ReleaseType As eReleaseType = Build_xxV)
     
+    Dim strBinaryFile As String
     Const cstrSpacer As String = "--------------------------------------------------------------"
         
     ' Make sure we don't run ths function while it is loaded in another project.
@@ -294,10 +291,65 @@ Public Sub Deploy(Optional ReleaseType As eReleaseType = Build_xxV)
     ' Export the source code to version control
     ExportSource
     
+    ' Save copy to zip folder
+    strBinaryFile = CodeProject.Path & "\Version_Control_v" & AppVersion & ".zip"
+    CreateZipFile strBinaryFile
+    CopyToZip CodeProject.FullName, strBinaryFile
+    
     ' Deploy latest version on this machine
     If InstallVCSAddin Then Debug.Print "Version " & AppVersion & " installed."
     
 End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : CreateZipFile
+' Author    : Adam Waller
+' Date      : 5/26/2020
+' Purpose   : Create an empty zip file to copy files into.
+'           : Adapted from: http://www.rondebruin.nl/win/s7/win001.htm
+'---------------------------------------------------------------------------------------
+'
+Private Sub CreateZipFile(strPath As String)
+    
+    Dim strHeader As String
+    Dim intFile As Integer
+    
+    ' Build Zip file header
+    strHeader = "PK" & Chr$(5) & Chr$(6) & String$(18, 0)
+    
+    ' Write to file
+    If FSO.FileExists(strPath) Then Kill strPath
+    intFile = FreeFile
+    Open strPath For Output As #intFile
+        Print #intFile, strHeader
+    Close #intFile
+    
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : CopyToZip
+' Author    : Adam Waller
+' Date      : 5/26/2020
+' Purpose   : Copy a file into a zip archive.
+'           : Adapted from: http://www.rondebruin.nl/win/s7/win001.htm
+'---------------------------------------------------------------------------------------
+'
+Private Function CopyToZip(strFile As String, strZip As String)
+    
+    Dim oApp As Object
+    Dim varZip As Variant
+    Dim varFile As Variant
+    
+    ' Must use variants for the CopyHere function to work.
+    varZip = strZip
+    varFile = strFile
+    
+    Set oApp = CreateObject("Shell.Application")
+    oApp.NameSpace(varZip).CopyHere varFile
+    
+End Function
 
 
 '---------------------------------------------------------------------------------------
