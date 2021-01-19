@@ -37,6 +37,9 @@
     "AggressiveSanitize": true,
     "ExtractThemeFiles": false,
     "TablesToExportData": {
+      "USysRibbons": {
+        "Format": "XML Format"
+      }
     },
     "RunBeforeExport": "",
     "RunAfterExport": "",

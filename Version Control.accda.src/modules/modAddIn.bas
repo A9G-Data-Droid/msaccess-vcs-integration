@@ -120,6 +120,8 @@ Public Function AutoRun() As Boolean
             End If
         End If
     End If
+    
+    LoadRibbons
     AutoRun = True
 
 End Function
