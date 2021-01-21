@@ -5,11 +5,10 @@
 		<mso:tabs>
 			<mso:tab id="VCSRibbon" label="Version Control">
 				<mso:group id="VCSCommands" label="Actions">
-				    <mso:button id="loadGUI" label="Version Control" imageMso="CustomActionsMenu" size="large" onAction="=AddInMenuItemLaunch()" tag="Primary"/>
+					<mso:button id="loadGUI" label="Version Control" imageMso="CustomActionsMenu" size="large" onAction="=AddInMenuItemLaunch()" tag="Primary"/>
 					<mso:button id="exportSrc" label="Export All Source" imageMso="ExportDBase" size="large" onAction="=AddInMenuItemExport()" />
-					<mso:button id="importSrc" label="Compile From Source" imageMso="ImportAccess" size="large" onAction="=RunExportForCurrentDB()" />
 				</mso:group>
 			</mso:tab>
 		</mso:tabs>
-    </mso:ribbon>
+	</mso:ribbon>
 </mso:customUI>
