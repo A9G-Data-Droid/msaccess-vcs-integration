@@ -45,13 +45,13 @@ End Sub
 '
 Private Sub IDbComponent_Export()
     
-    Dim dItem As Scripting.Dictionary
-    Dim dField As Scripting.Dictionary
+    Dim dItem As Dictionary
+    Dim dField As Dictionary
     Dim colItems As Collection
     Dim fld As DAO.Field
     
     ' Relation properties
-    Set dItem = New Scripting.Dictionary
+    Set dItem = New Dictionary
     With dItem
         .Add "Name", m_Relation.Name
         .Add "Attributes", m_Relation.Attributes
@@ -72,7 +72,7 @@ Private Sub IDbComponent_Export()
     dItem.Add "Fields", colItems
     
     ' Write to json file
-    WriteJsonFile Me, dItem, IDbComponent_SourceFile, "Database relationship"
+    WriteJsonFile TypeName(Me), dItem, IDbComponent_SourceFile, "Database relationship"
     
 End Sub
 
@@ -86,13 +86,16 @@ End Sub
 '
 Private Sub IDbComponent_Import(strFile As String)
     
-    Dim dItem As Scripting.Dictionary
+    Dim dItem As Dictionary
     Dim dFile As Dictionary
-    Dim dField As Scripting.Dictionary
+    Dim dField As Dictionary
     Dim fld As DAO.Field
     Dim dbs As DAO.Database
     Dim rel As DAO.Relation
-    
+
+    ' Only import files with the correct extension.
+    If Not strFile Like "*.json" Then Exit Sub
+
     ' Parse json file
     Set dFile = ReadJsonFile(strFile)
     If Not dFile Is Nothing Then
@@ -107,13 +110,37 @@ Private Sub IDbComponent_Import(strFile As String)
         For Each dField In dItem("Fields")
             Set fld = rel.CreateField(dField("Name"))
             fld.ForeignName = dField("ForeignName")
+            rel.Fields.Append fld
         Next dField
-        rel.Fields.Append fld
+        
+        ' Relationships create indexes, so we need to make sure an index
+        ' with this name doesn't already exist. (Also check to be sure that
+        ' we don't already have a relationship with this name.
+        If DebugMode Then On Error Resume Next Else On Error Resume Next
+        With dbs
+            .TableDefs(rel.Table).Indexes.Delete rel.Name
+            .TableDefs(rel.ForeignTable).Indexes.Delete rel.Name
+            .Relations.Delete rel.Name
+        End With
+        CatchAny eelNoError, vbNullString, , False
         
         ' Add relationship to database
         dbs.Relations.Append rel
     End If
     
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
+
 End Sub
 
 
@@ -124,7 +151,7 @@ End Sub
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
     
     Dim rel As Relation
     Dim cRelation As IDbComponent
@@ -141,7 +168,8 @@ Private Function IDbComponent_GetAllFromDB() As Collection
         For Each rel In m_Dbs.Relations
             ' Navigation pane groups are handled separately
             If Not (rel.Name = "MSysNavPaneGroupsMSysNavPaneGroupToObjects" _
-                Or rel.Name = "MSysNavPaneGroupCategoriesMSysNavPaneGroups") Then
+                Or rel.Name = "MSysNavPaneGroupCategoriesMSysNavPaneGroups" _
+                Or IsInherited(rel)) Then
                 Set cRelation = New clsDbRelation
                 Set cRelation.DbObject = rel
                 m_AllItems.Add cRelation, rel.Name
@@ -156,69 +184,16 @@ End Function
 
 
 '---------------------------------------------------------------------------------------
-' Procedure : ImportRelation
-' Author    : Adam Kauffman
-' Date      : 02/18/2020
-' Purpose   : Import a table relationship
+' Procedure : IsInherited
+' Author    : Adam Waller
+' Date      : 6/30/2020
+' Purpose   : Returns true if the relationship was inherited from tables in a linked
+'           : database. (We don't need to export or import these.)
 '---------------------------------------------------------------------------------------
 '
-Private Sub ImportRelation(ByRef filePath As String, Optional ByRef appInstance As Application)
-    If appInstance Is Nothing Then Set appInstance = Application.Application
-    
-    Dim thisDb As Database
-    Set thisDb = appInstance.CurrentDb
-    
-    Dim fileLines() As String
-    With FSO.OpenTextFile(filePath, IOMode:=ForReading, Create:=False, Format:=TristateFalse)
-        fileLines = Split(.ReadAll, vbCrLf)
-        .Close
-    End With
-    
-    Dim newRelation As Relation
-    Set newRelation = thisDb.CreateRelation(fileLines(1), fileLines(2), fileLines(3), fileLines(0))
-    
-    Dim newField As DAO.Field
-    Dim thisLine As Long
-    For thisLine = 4 To UBound(fileLines)
-        If "Field = Begin" = fileLines(thisLine) Then
-            thisLine = thisLine + 1
-            Set newField = newRelation.CreateField(fileLines(thisLine))  ' Name set here
-            thisLine = thisLine + 1
-            newField.ForeignName = fileLines(thisLine)
-            thisLine = thisLine + 1
-            If "End" <> fileLines(thisLine) Then
-                Set newField = Nothing
-                Err.Raise 40000, "ImportRelation", "Missing 'End' for a 'Begin' in " & filePath
-            End If
-            
-            newRelation.Fields.Append newField
-        End If
-    Next thisLine
-        
-    ' Remove conflicting Index entries because adding the relation creates new indexes causing "Error 3284 Index already exists"
-    On Error Resume Next
-    With thisDb
-        .Relations.Delete newRelation.Name  ' Avoid 3012 Relationship already exists
-        .TableDefs(newRelation.Table).Indexes.Delete newRelation.Name
-        .TableDefs(newRelation.ForeignTable).Indexes.Delete newRelation.Name
-    End With
-    On Error GoTo ErrorHandler
-    
-    With thisDb.Relations
-        .Append newRelation
-    End With
-    
-ErrorHandler:
-    Select Case Err.Number
-    Case 0
-    Case 3012
-        Debug.Print "Relationship already exists: """ & newRelation.Name & """ "
-    Case 3284
-        Debug.Print "Index already exists for: """ & newRelation.Name & """ "
-    Case Else
-        Debug.Print "Failed to add: """ & newRelation.Name & """ " & Err.Number & " " & Err.Description
-    End Select
-End Sub
+Private Function IsInherited(objRelation As Relation) As Boolean
+    IsInherited = ((objRelation.Attributes And dbRelationInherited) = dbRelationInherited)
+End Function
 
 
 '---------------------------------------------------------------------------------------
@@ -253,8 +228,8 @@ End Function
 ' Purpose   : Return a list of file names to import for this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
-    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder & "*.json")
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
+    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder, "*.json")
 End Function
 
 
@@ -265,9 +240,22 @@ End Function
 ' Purpose   : Remove any source files for objects not in the current database.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
     ClearFilesByExtension IDbComponent_BaseFolder, "txt"
     ClearOrphanedSourceFiles Me, "json"
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+
 End Function
 
 
@@ -281,7 +269,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_DateModified() As Date
-    ' No modification date available for relations
+    IDbComponent_DateModified = 0
 End Function
 
 
@@ -296,7 +284,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -308,7 +296,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "relations"
+    IDbComponent_Category = "Relations"
 End Property
 
 
@@ -319,7 +307,7 @@ End Property
 ' Purpose   : Return the base folder for import/export of this component.
 '---------------------------------------------------------------------------------------
 Private Property Get IDbComponent_BaseFolder() As String
-    IDbComponent_BaseFolder = Options.GetExportFolder & "relations\"
+    IDbComponent_BaseFolder = Options.GetExportFolder & "relations" & PathSep
 End Property
 
 
@@ -354,8 +342,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -407,6 +395,7 @@ End Property
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_SingleFile() As Boolean
+    IDbComponent_SingleFile = False
 End Property
 
 

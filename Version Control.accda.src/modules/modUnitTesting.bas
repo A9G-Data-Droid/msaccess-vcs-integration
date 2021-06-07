@@ -1,4 +1,4 @@
-Option Compare Database
+ï»¿Option Compare Database
 Option Explicit
 Option Private Module
 
@@ -39,7 +39,7 @@ Public Sub TestUCS2toUTF8RoundTrip()
     
     'Arrange:
     Dim queryName As String
-    queryName = "Temp_Test_Query_Delete_Me_Æ_ø_Å"
+    queryName = "Temp_Test_Query_Delete_Me_Ã†_Ã¸_Ã…"
     Dim tempFileName As String
     tempFileName = GetTempFile()
     
@@ -53,13 +53,13 @@ Public Sub TestUCS2toUTF8RoundTrip()
     UTFtoUCS = tempFileName & "UTF-8toUCS-2"
     
     ' Use temporary query to export example file
-    CurrentDb.CreateQueryDef queryName, "SELECT * FROM TEST WHERE TESTING='ÆØÅ'"
+    CurrentDb.CreateQueryDef queryName, "SELECT * FROM TEST WHERE TESTING='Ã†Ã˜Ã…'"
     Application.SaveAsText acQuery, queryName, tempFileName
     CurrentDb.QueryDefs.Delete queryName
         
     ' Read original export
     Dim originalExport As String
-    With FSO.OpenTextFile(tempFileName, , , TristateTrue)
+    With FSO.OpenTextFile(tempFileName, ForReading, False, TristateTrue)
         originalExport = .ReadAll
         .Close
     End With
@@ -72,14 +72,14 @@ Public Sub TestUCS2toUTF8RoundTrip()
     
     ' Read final file that went through all permutations of conversion
     Dim finalFile As String
-    With FSO.OpenTextFile(UTFtoUCS, , , TristateTrue)
+    With FSO.OpenTextFile(UTFtoUCS, ForReading, False, TristateTrue)
         finalFile = .ReadAll
         .Close
     End With
     
     ' Cleanup temp files
-    'fso.DeleteFile tempFileName
-    'fso.DeleteFile UTFtoUCS
+    'deletefile tempFileName
+    'deletefile UTFtoUCS
     
     'Assert:
     Assert.AreEqual originalExport, finalFile
@@ -96,23 +96,24 @@ End Sub
 '@TestMethod("TextConversion")
 Private Sub TestParseSpecialCharsInJson()
     On Error GoTo TestFail
-    
+       
     'Arrange:
     Dim strPath As String
     Dim dict As Dictionary
-    Dim FSO
+    Dim FSO As Object
+    
     strPath = GetTempFile
         
     Set FSO = CreateObject("Scripting.FileSystemObject")
     With FSO.CreateTextFile(strPath, True)
-        .WriteLine "{""Test"":""ÆØÅ are special?""}"
+        .WriteLine "{""Test"":""Ã†Ã˜Ã… are special?""}"
         .Close
     End With
     
     Debug.Print strPath
     
     'Act:
-    Set dict = modFunctions.ReadJsonFile(strPath)
+    Set dict = modFileAccess.ReadJsonFile(strPath)
     
     'Assert:
     If dict Is Nothing Then
@@ -130,19 +131,68 @@ TestFail:
 End Sub
 
 
-Sub s()
-    Dim dItems As Scripting.Dictionary
-    Dim v As Variant
+'@TestMethod("Sorting")
+Private Sub TestSortDictionaryByKeys()
+    On Error GoTo TestFail
     
-    Set dItems = New Scripting.Dictionary
+    'Arrange:
+    Dim dItems As Dictionary
     
+    Set dItems = New Dictionary
     dItems.Add "C", "C"
     dItems.Add "A", "A"
     dItems.Add "B", "B"
     
-    Set dItems = SortDictionaryByKey(dItems)
+    'Act:
+    Set dItems = SortDictionaryByKeys(dItems)
     
-    For Each v In dItems
-        Debug.Print v
-    Next
+    'Assert:
+    Assert.AreEqual dItems.Items(0), "A"
+    Assert.AreEqual dItems.Items(1), "B"
+    Assert.AreEqual dItems.Items(2), "C"
+
+TestExit:
+    Exit Sub
+TestFail:
+    Assert.Fail "Test raised an error: #" & Err.Number & " - " & Err.Description
+End Sub
+
+
+'@TestMethod("QuickSort")
+Private Sub TestQuickSort()
+    
+    Dim arr() As String
+    Dim result As String
+    
+    arr = Split("u i a")
+    
+    QuickSort arr
+    result = Join(arr, " ")
+    Assert.AreEqual result, "a i u"
+    
+End Sub
+
+
+'@TestMethod("Concat")
+Private Sub TestConcat()
+    
+    With New clsConcat
+        .SelfTest
+    End With
+    
+End Sub
+
+
+'@TestMethod("SanitizeConnectionString")
+Private Sub TestSanitizeConnectionString()
+
+    ' Verify semicolon placement matches original
+    Debug.Assert SanitizeConnectionString(";test;test;") = ";test;test;"
+    Debug.Assert SanitizeConnectionString("test;test") = "test;test"
+    Debug.Assert SanitizeConnectionString(";test;test") = ";test;test"
+    Debug.Assert SanitizeConnectionString("test;test;") = "test;test;"
+    Debug.Assert SanitizeConnectionString("test;test;") = "test;test;"
+    Debug.Assert SanitizeConnectionString("test") = "test"
+    Debug.Assert SanitizeConnectionString(vbNullString) = vbNullString
+
 End Sub

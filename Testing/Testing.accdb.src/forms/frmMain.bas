@@ -15,16 +15,12 @@ Begin Form
     ItemSuffix =13
     Right =15975
     Bottom =11745
-    DatasheetGridlinesColor =14806254
+    DatasheetGridlinesColor =15132391
     RecSrcDt = Begin
         0x18691eff0b76e540
     End
     Caption ="Main Form"
     DatasheetFontName ="Calibri"
-    PrtMip = Begin
-        0x6801000068010000680100006801000000000000201c0000e010000001000000 ,
-        0x010000006801000000000000a10700000100000001000000
-    End
     OnLoad ="[Event Procedure]"
     FilterOnLoad =0
     ShowPageMargins =0
@@ -190,10 +186,10 @@ Begin Form
                     LayoutCachedWidth =8520
                     LayoutCachedHeight =3660
                     PictureCaptionArrangement =5
-                    BackColor =14136213
-                    BorderColor =14136213
-                    HoverColor =15060409
-                    PressedColor =9592887
+                    BackColor =14461583
+                    BorderColor =14461583
+                    HoverColor =15189940
+                    PressedColor =9917743
                     HoverForeColor =4210752
                     PressedForeColor =4210752
                     WebImagePaddingLeft =2
@@ -318,10 +314,10 @@ Begin Form
                     LayoutCachedWidth =8520
                     LayoutCachedHeight =4620
                     PictureCaptionArrangement =5
-                    BackColor =14136213
-                    BorderColor =14136213
-                    HoverColor =15060409
-                    PressedColor =9592887
+                    BackColor =14461583
+                    BorderColor =14461583
+                    HoverColor =15189940
+                    PressedColor =9917743
                     HoverForeColor =4210752
                     PressedForeColor =4210752
                     WebImagePaddingLeft =2
@@ -404,6 +400,12 @@ Public Sub cmdRunTests_Click()
     ' NOTE: don't include the test result on a line that may throw an error.
     On Error Resume Next
     
+    ' Update linked tables/CSV to use the current directory
+    dbs.TableDefs("tblLinkedAccess").Connect = ";DATABASE=" & Application.CurrentProject.Path & "\Testing.accdb"
+    dbs.TableDefs("tblLinkedAccess").RefreshLink
+    dbs.TableDefs("tblLinkedCSV").Connect = "Text;DSN=Linked Link Specification;FMT=Delimited;HDR=NO;IMEX=2;CharacterSet=437;ACCDB=YES;DATABASE=" & Application.CurrentProject.Path
+    dbs.TableDefs("tblLinkedCSV").RefreshLink
+    
     '========================
     '   BEGIN TESTS
     '========================
@@ -455,6 +457,8 @@ Public Sub cmdRunTests_Click()
     ' Reports
     strTest = CurrentProject.AllReports("rptNavigationPaneGroups").Name
     ShowResult "Report exists", (strTest = "rptNavigationPaneGroups")
+    ShowResult "Landscape Orientation", (Report_rptNonDefaultPaperSize.Printer.Orientation = acPRORLandscape)
+    ShowResult "A4 Paper Size", (Report_rptNonDefaultPaperSize.Printer.PaperSize = acPRPSA4)
     
     
     ' Macros
@@ -465,6 +469,8 @@ Public Sub cmdRunTests_Click()
     ' Modules
     strTest = CurrentProject.AllModules("basUtility").Name
     ShowResult "Standard Module exists", (strTest = "basUtility")
+    strTest = GetVBProjectForCurrentDB.VBComponents("basExtendedChars").CodeModule.Lines(6, 1)
+    ShowResult "Extended ASCII text in VBA", (Mid$(strTest, 10, 1) = Chr(151))
     
     strTest = CurrentProject.AllModules("clsPerson").Name
     ShowResult "Class Module exists", (strTest = "clsPerson")
@@ -500,8 +506,8 @@ Public Sub cmdRunTests_Click()
     strTest = Nz(DLookup("SpecName", "MSysIMEXSpecs", "SpecName=""Test 2"""))
     ShowResult "Saved IMEX spec (Table based)", (strTest = "Test 2")
     
-    strTest = Nz(DLookup("Name", "MSysNavPaneGroups", "GroupCategoryID=3 AND Name=""Linked Tables"""))
-    ShowResult "Custom navigation pane group", (strTest = "Linked Tables")
+    strTest = Nz(DLookup("Name", "MSysNavPaneGroups", "Name=""My Modules"""))
+    ShowResult "Custom navigation pane group", (strTest = "My Modules")
     
     ' VBE Project
     With GetVBProjectForCurrentDB

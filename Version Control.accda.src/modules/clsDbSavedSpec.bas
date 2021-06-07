@@ -31,23 +31,22 @@ Implements IDbComponent
 '
 Private Sub IDbComponent_Export()
     
-    Dim dSpec As Scripting.Dictionary
+    Dim dSpec As Dictionary
     
-    Set dSpec = New Scripting.Dictionary
+    Set dSpec = New Dictionary
     
-    On Error Resume Next
+    If DebugMode Then On Error Resume Next Else On Error Resume Next
     ' For some reason it throws an error if there is no
     ' description in the specification.
     With dSpec
         .Add "Name", m_Spec.Name
         .Add "Description", m_Spec.Description
-        .Add "XML", EncryptBetween(m_Spec.XML, "<ImportExportSpecification Path = """, """")
+        .Add "XML", m_Spec.XML
     End With
-    If Err Then Err.Clear
-    On Error GoTo 0
+    CatchAny eelNoError, vbNullString, , False
     
     ' Write as Json format.
-    WriteJsonFile Me, dSpec, IDbComponent_SourceFile, "Saved Import/Export Specification"
+    WriteJsonFile TypeName(Me), dSpec, IDbComponent_SourceFile, "Saved Import/Export Specification"
     
 End Sub
 
@@ -65,6 +64,9 @@ Private Sub IDbComponent_Import(strFile As String)
     Dim dSpec As Dictionary
     Dim dItem As Dictionary
     
+    ' Only import files with the correct extension.
+    If Not strFile Like "*.json" Then Exit Sub
+
     Set dSpec = ReadJsonFile(strFile)
     If Not dSpec Is Nothing Then
         Set dItem = dSpec("Items")
@@ -79,13 +81,26 @@ End Sub
 
 
 '---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
+
+End Sub
+
+
+'---------------------------------------------------------------------------------------
 ' Procedure : GetAllFromDB
 ' Author    : Adam Waller
 ' Date      : 4/23/2020
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
     
     Dim spec As ImportExportSpecification
     Dim cSpec As IDbComponent
@@ -113,8 +128,8 @@ End Function
 ' Purpose   : Return a list of file names to import for this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
-    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder & "*.json")
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
+    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder, "*.json")
 End Function
 
 
@@ -125,8 +140,21 @@ End Function
 ' Purpose   : Remove any source files for objects not in the current database.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
     ClearOrphanedSourceFiles Me, "json"
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+
 End Function
 
 
@@ -156,7 +184,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -168,7 +196,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "saved specs"
+    IDbComponent_Category = "Saved Specs"
 End Property
 
 
@@ -179,7 +207,7 @@ End Property
 ' Purpose   : Return the base folder for import/export of this component.
 '---------------------------------------------------------------------------------------
 Private Property Get IDbComponent_BaseFolder() As String
-    IDbComponent_BaseFolder = Options.GetExportFolder & "savedspecs\"
+    IDbComponent_BaseFolder = Options.GetExportFolder & "savedspecs" & PathSep
 End Property
 
 
@@ -214,8 +242,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -267,6 +295,7 @@ End Property
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_SingleFile() As Boolean
+    IDbComponent_SingleFile = False
 End Property
 
 

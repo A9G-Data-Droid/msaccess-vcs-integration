@@ -14,7 +14,7 @@ Option Explicit
 
 Private m_Query As AccessObject
 Private m_AllItems As Collection
-
+Private m_blnModifiedOnly As Boolean
 
 ' This requires us to use all the public methods and properties of the implemented class
 ' which keeps all the component classes consistent in how they are used in the export
@@ -37,12 +37,15 @@ Private Sub IDbComponent_Export()
 
     ' Save and sanitize file
     SaveComponentAsText acQuery, m_Query.Name, IDbComponent_SourceFile
+    VCSIndex.Update Me, eatExport
     
     ' Export as SQL (if using that option)
     If Options.SaveQuerySQL Then
+        Perf.OperationStart "Save Query SQL"
         Set dbs = CurrentDb
         strFile = IDbComponent_BaseFolder & GetSafeFileName(m_Query.Name) & ".sql"
         WriteFile dbs.QueryDefs(m_Query.Name).SQL, strFile
+        Perf.OperationEnd
         Log.Add "  " & m_Query.Name & " (SQL)", Options.ShowDebug
     End If
     
@@ -51,13 +54,66 @@ End Sub
 
 '---------------------------------------------------------------------------------------
 ' Procedure : Import
-' Author    : Adam Waller
-' Date      : 4/23/2020
+' Author    : Adam Waller / Indigo
+' Date      : 10/24/2020
 ' Purpose   : Import the individual database component from a file.
 '---------------------------------------------------------------------------------------
 '
 Private Sub IDbComponent_Import(strFile As String)
-    LoadComponentFromText acQuery, GetObjectNameFromFileName(strFile), strFile
+
+    Dim dbs As DAO.Database
+    Dim strQueryName As String
+    Dim strFileSql As String
+    Dim strSql As String
+    
+    ' Only import files with the correct extension.
+    If Not strFile Like "*.bas" Then Exit Sub
+    
+    ' Import query from file
+    strQueryName = GetObjectNameFromFileName(strFile)
+    LoadComponentFromText acQuery, strQueryName, strFile
+    Set m_Query = CurrentData.AllQueries(strQueryName)
+    VCSIndex.Update Me, eatImport
+    
+    ' In some cases, such as when a query contains a subquery, AND has been modified in the
+    ' visual query designer, it may be imported incorrectly and unable to run. For these
+    ' cases we have added an option to overwrite the .SQL property with the SQL that we
+    ' saved separately during the export. See the following link for further details:
+    ' https://github.com/joyfullservice/msaccess-vcs-integration/issues/76
+    
+    ' Check option to import exact query from SQL
+    If Options.ForceImportOriginalQuerySQL Then
+    
+        ' Replace .bas extension with .sql to get file content
+        strFileSql = Left$(strFile, Len(strFile) - 4) & ".sql"
+        
+        ' Tries to get SQL content from the SQL file previously exported
+        strSql = ReadFile(strFileSql)
+
+        ' Update query def with saved SQL
+        If strSql <> vbNullString Then
+            Set dbs = CurrentDb
+            dbs.QueryDefs(strQueryName).SQL = strSql
+            Log.Add "  Restored original SQL for " & strQueryName, Options.ShowDebug
+        Else
+            Log.Add "  Couldn't get original SQL query for " & strQueryName
+        End If
+    End If
+    
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
+    DeleteObjectIfExists acQuery, GetObjectNameFromFileName(strFile)
+    IDbComponent_Import strFile
 End Sub
 
 
@@ -68,24 +124,29 @@ End Sub
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
     
     Dim qry As AccessObject
     Dim cQuery As IDbComponent
 
     ' Build collection if not already cached
-    If m_AllItems Is Nothing Then
+    If m_AllItems Is Nothing Or (blnModifiedOnly <> m_blnModifiedOnly) Then
         Set m_AllItems = New Collection
+        m_blnModifiedOnly = blnModifiedOnly
         For Each qry In CurrentData.AllQueries
             Set cQuery = New clsDbQuery
             Set cQuery.DbObject = qry
-            m_AllItems.Add cQuery, qry.Name
+            If blnModifiedOnly Then
+                If cQuery.IsModified Then m_AllItems.Add cQuery, qry.Name
+            Else
+                m_AllItems.Add cQuery, qry.Name
+            End If
         Next qry
     End If
 
     ' Return cached collection
     Set IDbComponent_GetAllFromDB = m_AllItems
-
+            
 End Function
 
 
@@ -96,8 +157,8 @@ End Function
 ' Purpose   : Return a list of file names to import for this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
-    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder & "*.bas")
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
+    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder, "*.bas")
 End Function
 
 
@@ -108,8 +169,21 @@ End Function
 ' Purpose   : Remove any source files for objects not in the current database.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
     ClearOrphanedSourceFiles Me, "bas", "sql"
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+    IDbComponent_IsModified = (m_Query.DateModified > VCSIndex.GetExportDate(Me))
 End Function
 
 
@@ -138,7 +212,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -150,7 +224,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "queries"
+    IDbComponent_Category = "Queries"
 End Property
 
 
@@ -161,7 +235,7 @@ End Property
 ' Purpose   : Return the base folder for import/export of this component.
 '---------------------------------------------------------------------------------------
 Private Property Get IDbComponent_BaseFolder() As String
-    IDbComponent_BaseFolder = Options.GetExportFolder & "queries\"
+    IDbComponent_BaseFolder = Options.GetExportFolder & "queries" & PathSep
 End Property
 
 
@@ -196,8 +270,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -249,6 +323,7 @@ End Property
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_SingleFile() As Boolean
+    IDbComponent_SingleFile = False
 End Property
 
 

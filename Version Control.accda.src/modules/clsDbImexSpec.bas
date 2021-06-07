@@ -39,7 +39,7 @@ Private Sub IDbComponent_Export()
     Dim dCols As Dictionary
     Dim dbs As DAO.Database
     Dim rst As DAO.Recordset
-    Dim strSQL As String
+    Dim strSql As String
     Dim fld As DAO.Field
     
     Set dSpec = New Dictionary
@@ -47,8 +47,8 @@ Private Sub IDbComponent_Export()
     Set dbs = CurrentDb
 
     ' Build header info first
-    strSQL = "SELECT * FROM MSysIMEXSpecs WHERE SpecID=" & Me.ID
-    Set rst = dbs.OpenRecordset(strSQL, dbOpenSnapshot, dbReadOnly)
+    strSql = "SELECT * FROM MSysIMEXSpecs WHERE SpecID=" & Me.ID
+    Set rst = dbs.OpenRecordset(strSql, dbOpenSnapshot, dbReadOnly)
     With rst
         For Each fld In .Fields
             If fld.Name <> "SpecID" Then
@@ -60,8 +60,8 @@ Private Sub IDbComponent_Export()
     End With
     
     ' Build list of columns
-    strSQL = "SELECT * FROM MSysIMEXColumns WHERE SpecID=" & Me.ID
-    Set rst = dbs.OpenRecordset(strSQL, dbOpenSnapshot, dbReadOnly)
+    strSql = "SELECT * FROM MSysIMEXColumns WHERE SpecID=" & Me.ID
+    Set rst = dbs.OpenRecordset(strSql, dbOpenSnapshot, dbReadOnly)
     With rst
         Do While Not .EOF
             Set dCol = New Dictionary
@@ -83,7 +83,7 @@ Private Sub IDbComponent_Export()
     dSpec.Add "Columns", dCols
     
     ' Write as Json format.
-    WriteJsonFile Me, dSpec, IDbComponent_SourceFile, "Import/Export Specification from MSysIMEXSpecs"
+    WriteJsonFile TypeName(Me), dSpec, IDbComponent_SourceFile, "Import/Export Specification from MSysIMEXSpecs"
     
 End Sub
 
@@ -105,7 +105,10 @@ Private Sub IDbComponent_Import(strFile As String)
     Dim fld As DAO.Field
     Dim lngID As Long
     Dim varKey As Variant
-    
+
+    ' Only import files with the correct extension.
+    If Not strFile Like "*.json" Then Exit Sub
+
     ' Read data from JSON file
     Set dFile = ReadJsonFile(strFile)
     If Not dFile Is Nothing Then
@@ -153,17 +156,31 @@ End Sub
 
 
 '---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
+
+End Sub
+
+
+'---------------------------------------------------------------------------------------
 ' Procedure : GetAllFromDB
 ' Author    : Adam Waller
 ' Date      : 4/23/2020
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
     
     Dim cSpec As clsDbImexSpec
     Dim dbs As DAO.Database
     Dim rst As DAO.Recordset
+    Dim strName As String
     
     ' Build collection if not already cached
     If m_AllItems Is Nothing Then
@@ -178,9 +195,12 @@ Private Function IDbComponent_GetAllFromDB() As Collection
             Set rst = dbs.OpenRecordset("MSysIMEXSpecs", dbOpenSnapshot, dbReadOnly)
             With rst
                 Do While Not .EOF
+                    ' Keep in mind that the spec name may be blank
+                    strName = Nz(!SpecName)
+                    If strName = vbNullString Then strName = "Spec " & Nz(!SpecID, 0)
                     ' Add spec name
                     Set cSpec = New clsDbImexSpec
-                    cSpec.Name = Nz(!SpecName)
+                    cSpec.Name = strName
                     cSpec.ID = Nz(!SpecID, 0)
                     m_AllItems.Add cSpec, cSpec.Name
                     .MoveNext
@@ -223,8 +243,8 @@ End Sub
 ' Purpose   : Return a list of file names to import for this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
-    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder & "*.json")
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
+    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder, "*.json")
 End Function
 
 
@@ -235,8 +255,21 @@ End Function
 ' Purpose   : Remove any source files for objects not in the current database.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
     ClearOrphanedSourceFiles Me, "json"
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+
 End Function
 
 
@@ -266,7 +299,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -278,7 +311,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "imex specs"
+    IDbComponent_Category = "IMEX Specs"
 End Property
 
 
@@ -289,7 +322,7 @@ End Property
 ' Purpose   : Return the base folder for import/export of this component.
 '---------------------------------------------------------------------------------------
 Private Property Get IDbComponent_BaseFolder() As String
-    IDbComponent_BaseFolder = Options.GetExportFolder & "imexspecs\"
+    IDbComponent_BaseFolder = Options.GetExportFolder & "imexspecs" & PathSep
 End Property
 
 
@@ -324,8 +357,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -361,6 +394,7 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_DbObject() As Object
+    Set IDbComponent_DbObject = Nothing
 End Property
 Private Property Set IDbComponent_DbObject(ByVal RHS As Object)
 End Property

@@ -14,7 +14,8 @@ Option Explicit
 
 Private m_Table As DAO.TableDef
 Private m_AllItems As Collection
-Private m_Dbs
+Private m_blnModifiedOnly As Boolean
+Private m_Dbs As Database
 
 ' This requires us to use all the public methods and properties of the implemented class
 ' which keeps all the component classes consistent in how they are used in the export
@@ -46,32 +47,38 @@ Private Sub IDbComponent_Export()
     If tbl.Connect = vbNullString Then
     
         ' Check for existing file
-        If FSO.FileExists(strFile) Then Kill strFile
-        VerifyPath FSO.GetParentFolderName(strFile)
-    
+        If FSO.FileExists(strFile) Then DeleteFile strFile, True
+
         ' Save structure in XML format
+        VerifyPath strFile
+        Perf.OperationStart "App.ExportXML()"
         Application.ExportXML acExportTable, m_Table.Name, , strFile ', , , , acExportAllTableAndFieldProperties ' Add support for this later.
+        Perf.OperationEnd
     
     Else
         ' Linked table - Save as JSON
         Set dItem = New Dictionary
         With dItem
             .Add "Name", tbl.Name
-            .Add "Connect", Encrypt(tbl.Connect)
+            .Add "Connect", SanitizeConnectionString(tbl.Connect)
             .Add "SourceTableName", tbl.SourceTableName
             .Add "Attributes", tbl.Attributes
             ' indexes (Find primary key)
-            For Each idx In tbl.Indexes
-                If idx.Primary Then
-                    ' Add the primary key columns, using brackets just in case the field names have spaces.
-                    .Add "PrimaryKey", "[" & MultiReplace(CStr(idx.Fields), "+", "", ";", "], [") & "]"
-                    Exit For
-                End If
-            Next idx
+            If IndexAvailable(tbl) Then
+                For Each idx In tbl.Indexes
+                    If idx.Primary Then
+                        ' Add the primary key columns, using brackets just in case the field names have spaces.
+                        .Add "PrimaryKey", "[" & MultiReplace(CStr(idx.Fields), "+", vbNullString, ";", "], [") & "]"
+                        Exit For
+                    End If
+                Next idx
+            End If
         End With
-        WriteJsonFile Me, dItem, strFile, "Linked Table"
+        
+        ' Write export file.
+        WriteJsonFile TypeName(Me), dItem, strFile, "Linked Table"
+        
     End If
-    
     
     ' Optionally save in SQL format
     If Options.SaveTableSQL Then
@@ -79,6 +86,9 @@ Private Sub IDbComponent_Export()
         SaveTableSqlDef dbs, m_Table.Name, IDbComponent_BaseFolder
     End If
 
+    ' Update index
+    VCSIndex.Update Me, eatExport
+    
 End Sub
 
 
@@ -99,30 +109,23 @@ Public Sub SaveTableSqlDef(dbs As DAO.Database, strTable As String, strFolder As
     Dim strFile As String
     Dim tdf As DAO.TableDef
 
+    Perf.OperationStart "Save Table SQL"
     Set tdf = dbs.TableDefs(strTable)
 
     With cData
-        .Add "CREATE TABLE ["
-        .Add strTable
-        .Add "] ("
-        .Add vbCrLf
+        .Add "CREATE TABLE [", strTable, "] (", vbCrLf
 
         ' Loop through fields
         For Each fld In tdf.Fields
-            .Add "  ["
-            .Add fld.Name
-            .Add "] "
+            .Add "  [", fld.Name, "] "
             If (fld.Attributes And dbAutoIncrField) Then
                 .Add "AUTOINCREMENT"
             Else
-                .Add GetTypeString(fld.Type)
-                .Add " "
+                .Add GetTypeString(fld.Type), " "
             End If
             Select Case fld.Type
                 Case dbText, dbVarBinary
-                    .Add "("
-                    .Add fld.Size
-                    .Add ")"
+                    .Add "(", fld.Size, ")"
             End Select
 
             ' Indexes
@@ -133,53 +136,45 @@ Public Sub SaveTableSqlDef(dbs As DAO.Database, strTable As String, strFolder As
                     If idx.Unique Then cAttr.Add " UNIQUE"
                     If idx.Required Then cAttr.Add " NOT NULL"
                     If idx.Foreign Then AddFieldReferences dbs, idx.Fields, strTable, cAttr
-                    If Len(cAttr.GetStr) > 0 Then
-                        .Add " CONSTRAINT ["
-                        .Add idx.Name
-                        .Add "]"
-                    End If
+                    If Len(cAttr.GetStr) > 0 Then .Add " CONSTRAINT [", idx.Name, "]"
                 End If
                 .Add cAttr.GetStr
             Next
-            .Add ","
-            .Add vbCrLf
+            .Add ",", vbCrLf
         Next fld
         .Remove 3   ' strip off last comma and crlf
 
         ' Constraints
-        Set cAttr = New clsConcat
-        For Each idx In tdf.Indexes
-            If idx.Fields.Count > 1 Then
-                If Len(cAttr.GetStr) = 0 Then cAttr.Add " CONSTRAINT "
-                If idx.Primary Then
-                    cAttr.Add "["
-                    cAttr.Add idx.Name
-                    cAttr.Add "] PRIMARY KEY ("
-                    For Each fld In idx.Fields
-                        cAttr.Add fld.Name
-                        cAttr.Add ", "
-                    Next fld
-                    cAttr.Remove 2
-                    cAttr.Add ")"
-                End If
-                If Not idx.Foreign Then
-                    If Len(cAttr.GetStr) > 0 Then
-                        .Add ","
-                        .Add vbCrLf
-                        .Add "  "
-                        .Add cAttr.GetStr
-                        AddFieldReferences dbs, idx.Fields, strTable, cData
+        If IndexAvailable(tdf) Then
+            Set cAttr = New clsConcat
+            For Each idx In tdf.Indexes
+                If idx.Fields.Count > 1 Then
+                    If Len(cAttr.GetStr) = 0 Then cAttr.Add " CONSTRAINT "
+                    If idx.Primary Then
+                        cAttr.Add "[", idx.Name, "] PRIMARY KEY ("
+                        For Each fld In idx.Fields
+                            cAttr.Add "[", fld.Name, "], "
+                        Next fld
+                        cAttr.Remove 2
+                        cAttr.Add ")"
+                    End If
+                    If Not idx.Foreign Then
+                        If Len(cAttr.GetStr) > 0 Then
+                            .Add ",", vbCrLf
+                            .Add "  ", cAttr.GetStr
+                            AddFieldReferences dbs, idx.Fields, strTable, cData
+                        End If
                     End If
                 End If
-            End If
-        Next
-        .Add vbCrLf
-        .Add ")"
+            Next idx
+        End If
+        .Add vbCrLf, ")"
 
         ' Build file name and create file.
         strFile = strFolder & GetSafeFileName(strTable) & ".sql"
         WriteFile .GetStr, strFile
-
+        Perf.OperationEnd
+        
     End With
 
 End Sub
@@ -202,12 +197,9 @@ Private Sub AddFieldReferences(dbs As Database, fld As Object, strTable As Strin
             If FieldsIdentical(fld, rel.Fields) Then
 
                 ' References
-                cData.Add " REFERENCES "
-                cData.Add rel.Table
-                cData.Add " ("
+                cData.Add " REFERENCES [", rel.Table, "] ("
                 For Each fld2 In rel.Fields
-                    cData.Add fld2.Name
-                    cData.Add ","
+                    cData.Add "[", fld2.Name, "],"
                 Next fld2
                 ' Remove trailing comma
                 If rel.Fields.Count > 0 Then cData.Remove 1
@@ -297,6 +289,30 @@ End Function
 
 
 '---------------------------------------------------------------------------------------
+' Procedure : IndexAvailable
+' Author    : Adam Waller
+' Date      : 4/23/2020
+' Purpose   : Return true if the index collection is avilable. Without the error handling
+'           : this may throw an error if a linked table is not accessible during export.
+'---------------------------------------------------------------------------------------
+'
+Private Function IndexAvailable(tdf As TableDef) As Boolean
+
+    Dim lngTest As Long
+    
+    If DebugMode Then On Error Resume Next Else On Error Resume Next
+    lngTest = tdf.Indexes.Count
+    If Err Then
+        Err.Clear
+    Else
+        IndexAvailable = True
+    End If
+    CatchAny eelNoError, vbNullString, , False
+    
+End Function
+
+
+'---------------------------------------------------------------------------------------
 ' Procedure : Import
 ' Author    : Adam Waller
 ' Date      : 4/23/2020
@@ -305,12 +321,54 @@ End Function
 '
 Private Sub IDbComponent_Import(strFile As String)
 
-    Select Case LCase(FSO.GetExtensionName(strFile))
+    Dim blnUseTemp As Boolean
+    Dim strTempFile As String
+    Dim strName As String
+    
+    ' Determine import type from extension
+    Select Case LCase$(FSO.GetExtensionName(strFile))
+    
         Case "json"
             ImportLinkedTable strFile
+        
         Case "xml"
-            Application.ImportXML strFile, acStructureAndData
+            ' The ImportXML function does not properly handle UrlEncoded paths
+            blnUseTemp = (InStr(1, strFile, "%") > 0)
+            If blnUseTemp Then
+                ' Import from (safe) temporary file name.
+                strTempFile = GetTempFile
+                FSO.CopyFile strFile, strTempFile
+                Application.ImportXML strTempFile, acStructureOnly
+                DeleteFile strTempFile
+            Else
+                Application.ImportXML strFile, acStructureOnly
+            End If
+        
+        Case Else
+            ' Unsupported file
+            Exit Sub
+            
     End Select
+    
+    ' Update index
+    strName = GetObjectNameFromFileName(strFile)
+    Set m_Dbs = CurrentDb
+    Set m_Table = m_Dbs.TableDefs(strName)
+    VCSIndex.Update Me, eatImport
+    
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
+
 End Sub
 
 
@@ -327,7 +385,8 @@ Private Sub ImportLinkedTable(strFile As String)
     Dim dItem As Dictionary
     Dim dbs As DAO.Database
     Dim tdf As DAO.TableDef
-    Dim strSQL As String
+    Dim strSql As String
+    Dim strConnect As String
     
     ' Read json file
     Set dTable = ReadJsonFile(strFile)
@@ -337,33 +396,98 @@ Private Sub ImportLinkedTable(strFile As String)
         Set dItem = dTable("Items")
         Set dbs = CurrentDb
         Set tdf = dbs.CreateTableDef(dItem("Name"))
+        strConnect = GetFullConnect(dItem("Connect"))
         With tdf
-            .Connect = Decrypt(dItem("Connect"))
+            .Connect = strConnect
             .SourceTableName = dItem("SourceTableName")
+            .Attributes = SafeAttributes(dItem("Attributes"))
         End With
         dbs.TableDefs.Append tdf
-        dbs.TableDefs.Refresh
         
-        ' Might have to set this after adding the table?
-        If tdf.Attributes <> dItem("Attributes") Then tdf.Attributes = dItem("Attributes")
+        ' Verify that the connection matches the source file. (Issue #192)
+        If tdf.Connect <> strConnect Then
+            tdf.Connect = strConnect
+            tdf.RefreshLink
+        End If
+        dbs.TableDefs.Refresh
         
         ' Set index on linked table.
         If InStr(1, tdf.Connect, ";DATABASE=", vbTextCompare) = 1 Then
             ' Can't create a key on a linked Access database table.
             ' Presumably this would use the Access index instead of needing the pseudo index
         Else
-            ' Check for a primary key index
-            If dItem.Exists("PrimaryKey") Then
+            ' Check for a primary key index (Linked SQL tables may bring over the index, but linked views won't.)
+            If dItem.Exists("PrimaryKey") And Not HasUniqueIndex(tdf) Then
                 ' Create a pseudo index on the linked table
-                strSQL = "CREATE UNIQUE INDEX PrimaryKey ON [" & tdf.Name & "] (" & dItem("PrimaryKey") & ") WITH PRIMARY"
-                dbs.Execute strSQL, dbFailOnError
+                strSql = "CREATE UNIQUE INDEX __uniqueindex ON [" & tdf.Name & "] (" & dItem("PrimaryKey") & ") WITH PRIMARY"
+                dbs.Execute strSql, dbFailOnError
                 dbs.TableDefs.Refresh
             End If
         End If
-        
     End If
      
 End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : SafeAttributes
+' Author    : Adam Waller
+' Date      : 6/29/2020
+' Purpose   : Rebuild new attributes flag using attributes that we can actually set.
+'---------------------------------------------------------------------------------------
+'
+Private Function SafeAttributes(lngAttributes As Long) As Long
+
+    Dim colAtts As Collection
+    Dim varAtt As Variant
+    Dim lngNew As Long
+    
+    Set colAtts = New Collection
+    With colAtts
+        '.Add dbAttachedODBC
+        '.Add dbAttachedTable
+        .Add dbAttachExclusive
+        .Add dbAttachSavePWD
+        .Add dbHiddenObject
+        .Add dbSystemObject
+    End With
+    
+    For Each varAtt In colAtts
+        ' Use boolean logic to check for bit flag
+        If CBool((lngAttributes And varAtt) = varAtt) Then
+            ' Add to our rebuilt flag value.
+            lngNew = lngNew + varAtt
+        End If
+    Next varAtt
+    
+    ' Return attributes value after rebuilding from scratch.
+    SafeAttributes = lngNew
+    
+End Function
+
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : HasUniqueIndex
+' Author    : Adam Waller
+' Date      : 2/22/2021
+' Purpose   :
+'---------------------------------------------------------------------------------------
+'
+Private Function HasUniqueIndex(tdf As TableDef) As Boolean
+
+    Dim idx As DAO.Index
+    
+    If IndexAvailable(tdf) Then
+        For Each idx In tdf.Indexes
+            If idx.Unique Then
+                HasUniqueIndex = True
+                Exit For
+            End If
+        Next idx
+    End If
+    
+End Function
 
 
 '---------------------------------------------------------------------------------------
@@ -373,14 +497,15 @@ End Sub
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
     
     Dim tdf As TableDef
     Dim cTable As IDbComponent
     
     ' Build collection if not already cached
-    If m_AllItems Is Nothing Then
+    If m_AllItems Is Nothing Or (blnModifiedOnly <> m_blnModifiedOnly) Then
         Set m_AllItems = New Collection
+        m_blnModifiedOnly = blnModifiedOnly
         Set m_Dbs = CurrentDb
         For Each tdf In m_Dbs.TableDefs
             If tdf.Name Like "MSys*" Or tdf.Name Like "~*" Then
@@ -388,7 +513,11 @@ Private Function IDbComponent_GetAllFromDB() As Collection
             Else
                 Set cTable = New clsDbTableDef
                 Set cTable.DbObject = tdf
-                m_AllItems.Add cTable, tdf.Name
+                If blnModifiedOnly Then
+                    If cTable.IsModified Then m_AllItems.Add cTable, tdf.Name
+                Else
+                    m_AllItems.Add cTable, tdf.Name
+                End If
             End If
         Next tdf
     End If
@@ -406,9 +535,9 @@ End Function
 ' Purpose   : Return a list of file names to import for this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
-    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder & "*.xml")
-    MergeCollection IDbComponent_GetFileList, GetFilePathsInFolder(IDbComponent_BaseFolder & "*.json")
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
+    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder, "*.xml")
+    MergeCollection IDbComponent_GetFileList, GetFilePathsInFolder(IDbComponent_BaseFolder, "*.json")
 End Function
 
 
@@ -419,9 +548,22 @@ End Function
 ' Purpose   : Remove any source files for objects not in the current database.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
     ClearFilesByExtension IDbComponent_BaseFolder, "LNKD"
     ClearOrphanedSourceFiles Me, "LNKD", "bas", "sql", "xml", "tdf", "json"
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+    IDbComponent_IsModified = (m_Table.LastUpdated > VCSIndex.GetExportDate(Me))
 End Function
 
 
@@ -435,7 +577,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_DateModified() As Date
-    IDbComponent_DateModified = CurrentData.AllTables(m_Table.Name).DateModified
+    IDbComponent_DateModified = m_Table.LastUpdated
 End Function
 
 
@@ -450,7 +592,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -462,7 +604,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "tables"
+    IDbComponent_Category = "Tables"
 End Property
 
 
@@ -473,7 +615,7 @@ End Property
 ' Purpose   : Return the base folder for import/export of this component.
 '---------------------------------------------------------------------------------------
 Private Property Get IDbComponent_BaseFolder() As String
-    IDbComponent_BaseFolder = Options.GetExportFolder & "tbldefs\"
+    IDbComponent_BaseFolder = Options.GetExportFolder & "tbldefs" & PathSep
 End Property
 
 
@@ -513,8 +655,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -566,6 +708,7 @@ End Property
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_SingleFile() As Boolean
+    IDbComponent_SingleFile = False
 End Property
 
 

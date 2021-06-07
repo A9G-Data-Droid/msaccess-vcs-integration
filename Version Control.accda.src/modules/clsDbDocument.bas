@@ -31,7 +31,7 @@ Implements IDbComponent
 '---------------------------------------------------------------------------------------
 '
 Private Sub IDbComponent_Export()
-    WriteJsonFile Me, m_dItems, IDbComponent_SourceFile, "Database Documents Properties (DAO)"
+    WriteJsonFile TypeName(Me), m_dItems, IDbComponent_SourceFile, "Database Documents Properties (DAO)"
 End Sub
 
 
@@ -52,6 +52,9 @@ Private Sub IDbComponent_Import(strFile As String)
     Dim varCont As Variant
     Dim varDoc As Variant
     Dim varProp As Variant
+    
+    ' Only import files with the correct extension.
+    If Not strFile Like "*.json" Then Exit Sub
 
     Set dFile = ReadJsonFile(strFile)
     If Not dFile Is Nothing Then
@@ -74,6 +77,19 @@ End Sub
 
 
 '---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
+
+End Sub
+
+
+'---------------------------------------------------------------------------------------
 ' Procedure : ClearDatabaseSummaryProperties
 ' Author    : Adam Waller
 ' Date      : 5/13/2020
@@ -89,22 +105,25 @@ Private Sub ClearDatabaseSummaryProperties()
     Dim doc As DAO.Document
     Dim prp As DAO.Property
     Dim dbs As DAO.Database
+    Dim intProp As Integer
     
     Set dbs = CurrentDb
     Set doc = dbs.Containers("Databases").Documents("SummaryInfo")
-    For Each prp In doc.Properties
+    ' Loop backwards through the collection since we may be removing items.
+    For intProp = doc.Properties.Count - 1 To 0 Step -1
+        Set prp = doc.Properties(intProp)
         Select Case prp.Type
             Case dbText, dbMemo
                 ' Text properties
                 Select Case prp.Name
                     Case "Name", "Owner", "UserName", "Container" ' Leave these properties
                     Case Else
-                        ' Clear the value on any text value property
-                        ' (Maybe we should delete the property instead?)
-                        prp.Value = " "
+                        ' Remove other properties that might contain sensitive info.
+                        ' They will be recreated from source files if they were in use.
+                        doc.Properties.Delete prp.Name
                 End Select
         End Select
-    Next prp
+    Next intProp
     
 End Sub
 
@@ -116,7 +135,7 @@ End Sub
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
     
     Dim prp As DAO.Property
     Dim cDoc As IDbComponent
@@ -187,9 +206,9 @@ End Function
 ' Purpose   : Return a list of file names to import for this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
     Set IDbComponent_GetFileList = New Collection
-    IDbComponent_GetFileList.Add IDbComponent_SourceFile
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_GetFileList.Add IDbComponent_SourceFile
 End Function
 
 
@@ -200,7 +219,20 @@ End Function
 ' Purpose   : Remove any source files for objects not in the current database.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+
 End Function
 
 
@@ -230,7 +262,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -242,7 +274,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "doc properties"
+    IDbComponent_Category = "Doc Properties"
 End Property
 
 
@@ -288,8 +320,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -325,6 +357,7 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_DbObject() As Object
+    Set IDbComponent_DbObject = Nothing
 End Property
 Private Property Set IDbComponent_DbObject(ByVal RHS As Object)
 End Property

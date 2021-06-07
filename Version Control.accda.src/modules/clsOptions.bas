@@ -1,7 +1,7 @@
 Attribute VB_GlobalNameSpace = False
 Attribute VB_Creatable = False
 Attribute VB_PredeclaredId = False
-Attribute VB_Exposed = False
+Attribute VB_Exposed = True
 Option Compare Database
 Option Explicit
 
@@ -11,23 +11,42 @@ Option Explicit
 ' Further reading: https://english.stackexchange.com/questions/59058/
 
 Private Const cstrOptionsFilename As String = "vcs-options.json"
+Private Const cstrSourcePathProperty As String = "VCS Source Path"
+Private Const ModuleName As String = "clsOptions"
 
 ' Options
 Public ExportFolder As String
 Public ShowDebug As Boolean
 Public UseFastSave As Boolean
+Public UseGitIntegration As Boolean
+Public GitSettings As Dictionary
 Public SavePrintVars As Boolean
+Public ExportPrintSettings As Dictionary
 Public SaveQuerySQL As Boolean
+Public ForceImportOriginalQuerySQL As Boolean
 Public SaveTableSQL As Boolean
 Public StripPublishOption As Boolean
 Public AggressiveSanitize As Boolean
-Public TablesToExportData As Scripting.Dictionary
+Public ExtractThemeFiles As Boolean
+Public TablesToExportData As Dictionary
 Public RunBeforeExport As String
 Public RunAfterExport As String
 Public RunAfterBuild As String
-Public KeyName As String
+Public ShowVCSLegacy As Boolean
+Public HashAlgorithm As String
+Public UseShortHash As Boolean
+Public BreakOnError As Boolean
 
-Private m_colOptions As New Collection
+' Constants for enum values
+' (These values are not permanently stored and
+'  may change between releases.)
+Private Const Enum_Table_Format_TDF = 10
+Private Const Enum_Table_Format_XML = 11
+
+' Private collections for options and enum values.
+Private m_colOptions As Collection
+Private m_dEnum As Dictionary
+Private m_strOptionsFilePath As String
 
 
 '---------------------------------------------------------------------------------------
@@ -41,21 +60,67 @@ Private m_colOptions As New Collection
 Public Sub LoadDefaults()
 
     With Me
+        ' Top level settings
         .ExportFolder = vbNullString
         .ShowDebug = False
         .UseFastSave = True
+        .UseGitIntegration = False
         .SavePrintVars = True
         .SaveQuerySQL = True
+        .ForceImportOriginalQuerySQL = False
         .SaveTableSQL = True
         .StripPublishOption = True
         .AggressiveSanitize = True
-        .KeyName = "MSAccessVCS"
-        Set .TablesToExportData = New Scripting.Dictionary
+        .ShowVCSLegacy = True
+        .HashAlgorithm = DefaultHashAlgorithm
+        .UseShortHash = True
+
+        ' Table data export
+        Set .TablesToExportData = New Dictionary
         ' Save specific tables by default
         AddTableToExportData "USysRibbons", etdTabDelimited
         AddTableToExportData "USysRegInfo", etdTabDelimited
+
+        ' Print settings to export
+        Set .ExportPrintSettings = New Dictionary
+        With .ExportPrintSettings
+            .Add "Orientation", True
+            .Add "PaperSize", True
+            .Add "Duplex", False
+            .Add "PrintQuality", False
+            .Add "DisplayFrequency", False
+            .Add "Collate", False
+            .Add "Resolution", False
+            .Add "DisplayFlags", False
+            .Add "Color", False
+            .Add "Copies", False
+            .Add "ICMMethod", False
+            .Add "DefaultSource", False
+            .Add "Scale", False
+            .Add "ICMIntent", False
+            .Add "FormName", False
+            .Add "PaperLength", False
+            .Add "DitherType", False
+            .Add "MediaType", False
+            .Add "PaperWidth", False
+            .Add "TTOption", False
+        End With
+
+        ' Git integration settings
+        Set .GitSettings = New Dictionary
+        With .GitSettings
+            .Add "MergeUntrackedFiles", True
+            .Add "ImportTableData", False
+            .Add "MergeQuerySQL", False
+            .Add "MergeConflicts", "Cancel Merge"
+            .Add "RunBeforeMerge", vbNullString
+            .Add "RunAfterMerge", vbNullString
+            .Add "InspectSharedImages", False
+            .Add "InspectThemeFiles", False
+        End With
+
     End With
-    
+
 End Sub
 
 
@@ -67,12 +132,12 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Public Sub AddTableToExportData(strName As String, intExportFormat As eTableDataExportFormat)
-    
-    Dim strFormat(etdTabDelimited To etdXML)
-    Dim dTable As Scripting.Dictionary
-    
-    Set dTable = New Scripting.Dictionary
-    
+
+    Dim strFormat(etdTabDelimited To etdXML) As String
+    Dim dTable As Dictionary
+
+    Set dTable = New Dictionary
+
     strFormat(etdTabDelimited) = "TabDelimited"
     strFormat(etdXML) = "XMLFormat"
     With Me.TablesToExportData
@@ -80,7 +145,7 @@ Public Sub AddTableToExportData(strName As String, intExportFormat As eTableData
         .Item(strName)("Format") = GetTableExportFormatName(intExportFormat)
         ' Could add ExcludeColumns here later...
     End With
-    
+
 End Sub
 
 
@@ -104,7 +169,7 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Public Sub SaveOptionsAsDefault()
-    Me.SaveOptionsToFile CodeProject.Path & "\" & FSO.GetBaseName(CodeProject.Name) & ".json"
+    Me.SaveOptionsToFile FSO.BuildPath(CodeProject.Path, FSO.GetBaseName(CodeProject.Name)) & ".json"
 End Sub
 
 
@@ -116,6 +181,9 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Public Sub SaveOptionsForProject()
+    ' Save source path option in current database.
+    SavedSourcePath = Me.ExportFolder
+    ' Save options to the export folder location
     Me.SaveOptionsToFile Me.GetExportFolder & cstrOptionsFilename
 End Sub
 
@@ -129,23 +197,30 @@ End Sub
 '
 Public Sub LoadOptionsFromFile(strFile As String)
 
-    Dim dOptions As Scripting.Dictionary
+    Dim dFile As Dictionary
+    Dim dOptions As Dictionary
     Dim varOption As Variant
     Dim strKey As String
+
+    If DebugMode Then On Error GoTo 0 Else On Error Resume Next
     
-    If FSO.FileExists(strFile) Then
-        ' Read file contents
-        With FSO.OpenTextFile(strFile)
-            Set dOptions = modJsonConverter.ParseJson(.ReadAll)("Options")
-            .Close
-        End With
-        If Not dOptions Is Nothing Then
+    ' Save file path, in case we need to use it to determine
+    ' the export folder location with no database open.
+    m_strOptionsFilePath = strFile
+
+    ' Read in the options from the json file.
+    Set dFile = ReadJsonFile(strFile)
+    If Not dFile Is Nothing Then
+        If dFile.Exists("Options") Then
+            Set dOptions = dFile("Options")
             ' Attempt to set any matching options in this class.
             For Each varOption In m_colOptions
                 strKey = CStr(varOption)
                 If dOptions.Exists(strKey) Then
                     ' Set class property with value read from file.
                     Select Case strKey
+                        Case "ExportPrintSettings"
+                            Set Me.ExportPrintSettings = dOptions(strKey)
                         Case "TablesToExportData"
                             Set Me.TablesToExportData = dOptions(strKey)
                         Case Else
@@ -156,6 +231,8 @@ Public Sub LoadOptionsFromFile(strFile As String)
             Next varOption
         End If
     End If
+
+    CatchAny eelError, "Loading options from " & strFile, ModuleName & ".LoadOptionsFromFile"
     
 End Sub
 
@@ -168,7 +245,20 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Public Sub LoadProjectOptions()
+
+    Dim strSaved As String
+
+    ' We can only load the options for the current project if we
+    ' have a database file open.
+    If Not DatabaseOpen Then Exit Sub
+    
+    ' Get saved path from database (if defined)
+    strSaved = SavedSourcePath
+
+    ' Attempt to load the project options file.
+    If strSaved <> vbNullString Then Me.ExportFolder = strSaved
     LoadOptionsFromFile Me.GetExportFolder & cstrOptionsFilename
+    
 End Sub
 
 
@@ -180,7 +270,7 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Public Sub LoadDefaultOptions()
-    LoadOptionsFromFile CodeProject.Path & "\" & FSO.GetBaseName(CodeProject.Name) & ".json"
+    LoadOptionsFromFile FSO.BuildPath(CodeProject.Path, FSO.GetBaseName(CodeProject.Name)) & ".json"
 End Sub
 
 
@@ -200,18 +290,51 @@ End Sub
 ' Procedure : GetExportFolder
 ' Author    : Adam Waller
 ' Date      : 4/14/2020
-' Purpose   : Returns the actual export folder, even if a path hasn't been defined.
+' Purpose   : Returns the actual export folder path from the ExportFolder option.
+'           : NOTE: We cannot return a relative export folder path without an open
+'           : database file.
 '---------------------------------------------------------------------------------------
 '
 Public Function GetExportFolder() As String
+
+    Dim strFullPath As String
+
     If Me.ExportFolder = vbNullString Then
-        ' Build default path using project name
-        GetExportFolder = CurrentProject.FullName & ".src\"
+        ' Build default path using project file name
+        strFullPath = CurrentProject.FullName & ".src" & PathSep
     Else
-        ' This should be an absolute path, not a relative one.
-        GetExportFolder = Me.ExportFolder
+        If Left$(Me.ExportFolder, 2) = PathSep & PathSep Then
+            ' UNC path
+            strFullPath = Me.ExportFolder
+        ElseIf Left$(Me.ExportFolder, 1) = PathSep Then
+            ' Relative path (from database file location)
+            strFullPath = CurrentProject.Path & Me.ExportFolder
+        Else
+            ' Other absolute path (i.e. c:\myfiles\)
+            strFullPath = Me.ExportFolder
+        End If
+        ' Placeholder replacements
+        If InStr(1, strFullPath, "%dbName%", vbTextCompare) > 0 Then
+            strFullPath = Replace(strFullPath, "%dbName%", CurrentProject.Name, , , vbTextCompare)
+        End If
     End If
+
+    ' Check to make sure we have built a valid path.
+    Select Case strFullPath
+        Case PathSep & PathSep, PathSep, ".src" & PathSep, vbNullString
+            ' Invalid paths
+            MsgBox2 "Cannot determine export path", _
+                "A database file must be open to return a relative export path.", _
+                "This is probably due to a problem in the build sequence logic.", vbExclamation
+            Log.Add "ERROR: Cannot build relative export folder path without an open database file."
+            GetExportFolder = vbNullString
+        Case Else
+            ' Return export path with a trailing slash
+            GetExportFolder = StripSlash(strFullPath) & PathSep
+    End Select
+
 End Function
+
 
 '---------------------------------------------------------------------------------------
 ' Procedure : SerializeOptions
@@ -220,19 +343,21 @@ End Function
 ' Purpose   : Serializes Options into a dictionary array for saving to file as JSON.
 '---------------------------------------------------------------------------------------
 '
-Private Function SerializeOptions() As Scripting.Dictionary
+Private Function SerializeOptions() As Dictionary
 
-    Dim dOptions As Scripting.Dictionary
-    Dim dInfo As Scripting.Dictionary
-    Dim dWrapper As Scripting.Dictionary
+    Dim dOptions As Dictionary
+    Dim dInfo As Dictionary
+    Dim dWrapper As Dictionary
     Dim varOption As Variant
     Dim strOption As String
     Dim strBit As String
-    
-    Set dOptions = New Scripting.Dictionary
-    Set dInfo = New Scripting.Dictionary
-    Set dWrapper = New Scripting.Dictionary
-    
+
+    If DebugMode Then On Error GoTo 0 Else On Error Resume Next
+
+    Set dOptions = New Dictionary
+    Set dInfo = New Dictionary
+    Set dWrapper = New Dictionary
+
     ' Add some header information (For debugging or upgrading)
     #If Win64 Then
         strBit = " 64-bit"
@@ -241,19 +366,33 @@ Private Function SerializeOptions() As Scripting.Dictionary
     #End If
     dInfo.Add "AddinVersion", AppVersion
     dInfo.Add "AccessVersion", Application.Version & strBit
-    dInfo.Add "Hash", Encrypt(CodeProject.Name)
-    
+
+    ' Loop through options
     For Each varOption In m_colOptions
-        strOption = CStr(varOption)
-        ' Simulate reflection to serialize properties
-        dOptions.Add CStr(strOption), CallByName(Me, strOption, VbGet)
+        ' Simulate reflection to serialize properties.
+        dOptions.Add CStr(varOption), CallByName(Me, CStr(varOption), VbGet)
     Next varOption
-    
-    'Set SerializeOptions = New Scripting.Dictionary
+
+    'Set SerializeOptions = new Dictionary
     Set dWrapper("Info") = dInfo
     Set dWrapper("Options") = dOptions
     Set SerializeOptions = dWrapper
-    
+
+    CatchAny eelError, "Serializing options", ModuleName & ".SerializeOptions"
+
+End Function
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : GetHash
+' Author    : Adam Waller
+' Date      : 2/16/2021
+' Purpose   : Return a hash of the current options. Used to detect if options have
+'           : changed, which may require a full export to reflect the change.
+'---------------------------------------------------------------------------------------
+'
+Public Function GetHash() As String
+    GetHash = GetDictionaryHash(SerializeOptions)
 End Function
 
 
@@ -292,6 +431,37 @@ Public Function GetTableExportFormat(strKey As String) As eTableDataExportFormat
     Next intFormat
 End Function
 
+
+'---------------------------------------------------------------------------------------
+' Procedure : GetEnumName
+' Author    : Adam Waller
+' Date      : 6/1/2020
+' Purpose   : Translate the enum value to name for saving to file.
+'---------------------------------------------------------------------------------------
+'
+Private Function GetEnumName(intVal As Integer) As String
+    If m_dEnum.Exists(intVal) Then GetEnumName = m_dEnum(intVal)
+End Function
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : GetEnumVal
+' Author    : Adam Waller
+' Date      : 6/1/2020
+' Purpose   : Get enum value when reading string name from file.
+'---------------------------------------------------------------------------------------
+'
+Private Function GetEnumVal(strName As String) As Integer
+    Dim varKey As Variant
+    For Each varKey In m_dEnum.Keys
+        If m_dEnum(varKey) = strName Then
+            GetEnumVal = varKey
+            Exit For
+        End If
+    Next varKey
+End Function
+
+
 '---------------------------------------------------------------------------------------
 ' Procedure : Class_Initialize
 ' Author    : Adam Waller
@@ -300,28 +470,108 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Sub Class_Initialize()
-    
+
+    ' Initialize the options collection
+    Set m_colOptions = New Collection
+
+    ' Load enum values
+    Set m_dEnum = New Dictionary
+
     ' Load list of property names for reflection type behavior.
     With m_colOptions
         .Add "ExportFolder"
         .Add "ShowDebug"
         .Add "UseFastSave"
+        .Add "UseGitIntegration"
         .Add "SavePrintVars"
+        .Add "ExportPrintSettings"
         .Add "SaveQuerySQL"
+        .Add "ForceImportOriginalQuerySQL"
         .Add "SaveTableSQL"
         .Add "StripPublishOption"
         .Add "AggressiveSanitize"
+        .Add "ExtractThemeFiles"
         .Add "TablesToExportData"
         .Add "RunBeforeExport"
         .Add "RunAfterExport"
         .Add "RunAfterBuild"
-        .Add "KeyName"
+        .Add "ShowVCSLegacy"
+        .Add "HashAlgorithm"
+        .Add "UseShortHash"
+        .Add "BreakOnError"
     End With
-    
+
     ' Load default values
     Me.LoadDefaults
-    
+
     ' Other run-time options
     JsonOptions.AllowUnicodeChars = True
-    
+
 End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : SavedSourcePath
+' Author    : Adam Waller
+' Date      : 7/13/2020
+' Purpose   : Get any saved path for VCS source files. (In case we are using a
+'           : different location for the files.) This is stored as a property
+'           : under the currentproject. (Works for both ADP and MDB)
+'---------------------------------------------------------------------------------------
+'
+Private Property Get SavedSourcePath() As String
+    Dim prp As AccessObjectProperty
+    Set prp = GetSavedSourcePathProperty
+    If Not prp Is Nothing Then SavedSourcePath = prp.Value
+End Property
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : SavedSourcePath
+' Author    : Adam Waller
+' Date      : 7/14/2020
+' Purpose   : Save the source path as a property in the current database.
+'---------------------------------------------------------------------------------------
+'
+Private Property Let SavedSourcePath(strPath As String)
+
+    Dim prp As AccessObjectProperty
+    Dim proj As CurrentProject
+
+    Set proj = CurrentProject
+    Set prp = GetSavedSourcePathProperty
+
+    If strPath = vbNullString Then
+        ' Remove the property when no longer used.
+        If Not prp Is Nothing Then proj.Properties.Remove prp.Name
+    Else
+        If prp Is Nothing Then
+            ' Create the property
+            proj.Properties.Add cstrSourcePathProperty, strPath
+        Else
+            ' Update the value.
+            prp.Value = strPath
+        End If
+    End If
+
+End Property
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : GetSavedSourcePathProperty
+' Author    : Adam Waller
+' Date      : 7/14/2020
+' Purpose   : Helper function to get
+'---------------------------------------------------------------------------------------
+'
+Private Function GetSavedSourcePathProperty() As AccessObjectProperty
+    Dim prp As AccessObjectProperty
+    If DatabaseOpen Then
+        For Each prp In CurrentProject.Properties
+            If prp.Name = cstrSourcePathProperty Then
+                Set GetSavedSourcePathProperty = prp
+                Exit For
+            End If
+        Next prp
+    End If
+End Function

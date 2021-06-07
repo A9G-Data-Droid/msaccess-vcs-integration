@@ -1,428 +1,16 @@
-Option Explicit
+'---------------------------------------------------------------------------------------
+' Module    : modFunctions
+' Author    : Adam Waller
+' Date      : 12/4/2020
+' Purpose   : General functions that don't fit more specifically into another module.
+'---------------------------------------------------------------------------------------
 Option Compare Database
 Option Private Module
-
-Public Const JSON_WHITESPACE As Integer = 2
-
-Public colVerifiedPaths As New Collection
-
-' Formats used when exporting table data.
-Public Enum eTableDataExportFormat
-    etdNoData = 0
-    etdTabDelimited = 1
-    etdXML = 2
-    [_Last] = 2
-End Enum
-
-' Object types used when determining SQL modification date.
-Public Enum eSqlObjectType
-    estView
-    estStoredProcedure
-    estTable
-    estTrigger
-    estOther
-End Enum
-
-' Types of objects that can be exported/imported from a database.
-' (Use corresponding constants wherever possible)
-' Be careful not to create collisions with two members sharing the
-' same value.
-Public Enum eDatabaseComponentType
-    ' Standard database objects
-    edbForm
-    edbMacro
-    edbModule
-    edbQuery
-    edbReport
-    edbTableDef
-    edbTableDataMacro
-    edbLinkedTable
-    ' ADP specific
-    edbAdpTable
-    edbAdpFunction
-    edbAdpServerView
-    edbAdpStoredProcedure
-    edbAdpTrigger
-    ' Custom object types we are also handling.
-    edbTableData
-    edbRelation
-    edbDbsProperty
-    edbProjectProperty
-    edbFileProperty
-    edbSharedImage
-    edbDocument
-    edbSavedSpec
-    edbImexSpec
-    edbNavPaneGroup
-    edbVbeForm
-    edbVbeProject
-    edbVbeReference
-End Enum
+Option Explicit
 
 
-' Logging and options classes
-Private m_Log As clsLog
-Private m_Options As clsOptions
-
-' Keep a persistent reference to file system object after initializing version control.
-' This way we don't have to recreate this object dozens of times while using VCS.
-Private m_FSO As Scripting.FileSystemObject
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : SanitizeFile
-' Author    : Adam Waller
-' Date      : 1/23/2019
-' Purpose   : Sanitize the text file (forms and reports)
-'---------------------------------------------------------------------------------------
-'
-Public Sub SanitizeFile(strPath As String)
-    
-    Dim sngOverall As Single
-    Dim sngTimer As Single
-    Dim cData As New clsConcat
-    Dim strText As String
-    Dim rxBlock As New VBScript_RegExp_55.RegExp
-    Dim rxLine As New VBScript_RegExp_55.RegExp
-    Dim rxIndent As New VBScript_RegExp_55.RegExp
-    Dim objMatches As VBScript_RegExp_55.MatchCollection
-    Dim blnIsReport As Boolean
-    Dim cPattern As New clsConcat
-    Dim stmInFile As ADODB.Stream
-    Dim blnGetLine As Boolean
-    
-    On Error GoTo 0
-    
-    ' Timers to monitor performance
-    sngTimer = Timer
-    sngOverall = sngTimer
-        
-    '  Setup Block matching Regex.
-    rxBlock.IgnoreCase = False
-    
-    ' Build main search patterns
-    With cPattern
-    
-        '  Match PrtDevNames / Mode with or without W
-        If Options.AggressiveSanitize Then .Add "(?:"
-        .Add "PrtDev(?:Names|Mode)[W]?"
-        If Options.AggressiveSanitize Then
-          '  Add and group aggressive matches
-          .Add "|GUID|""GUID""|NameMap|dbLongBinary ""DOL"""
-          .Add ")"
-        End If
-        
-        '  Ensure that this is the begining of a block.
-        .Add " = Begin"
-        
-        ' Set block search pattern
-        rxBlock.Pattern = .GetStr
-        .Clear
-        
-        '  Setup Line Matching Regex.
-        .Add "^\s*(?:"
-        .Add "Checksum ="
-        .Add "|BaseInfo|NoSaveCTIWhenDisabled =1"
-        If Options.StripPublishOption Then
-            .Add "|dbByte ""PublishToWeb"" =""1"""
-            .Add "|PublishOption =1"
-        End If
-        .Add ")"
-
-        ' Set line search pattern
-        rxLine.Pattern = .GetStr
-    End With
-    
-    ' Open file to read contents line by line.
-    Set stmInFile = New ADODB.Stream
-    stmInFile.Charset = "UTF-8"
-    stmInFile.Open
-    stmInFile.LoadFromFile strPath
-    
-    ' Skip past UTF-8 BOM header
-    strText = stmInFile.ReadText(-2)
-    If Left(strText, 3) = "﻿" Then strText = Mid(strText, 4)
-
-    ' Loop through lines in file
-    Do Until stmInFile.EOS
-    
-        ' Show progress increment during longer conversions
-        Log.Increment
-    
-        ' Check if we need to get a new line of text
-        If blnGetLine Then
-            strText = stmInFile.ReadText(-2)
-        Else
-            blnGetLine = True
-        End If
-        
-        ' Skip lines starting with line pattern
-        If rxLine.Test(strText) Then
-            
-            ' set up initial pattern
-            rxIndent.Pattern = "^(\s+)\S"
-            
-            ' Get indentation level.
-            Set objMatches = rxIndent.Execute(strText)
-            
-            ' Setup pattern to match current indent
-            Select Case objMatches.Count
-                Case 0
-                    rxIndent.Pattern = "^" & vbNullString
-                Case Else
-                    rxIndent.Pattern = "^" & objMatches(0).SubMatches(0)
-            End Select
-            rxIndent.Pattern = rxIndent.Pattern & "\S"
-            
-            ' Skip lines with deeper indentation
-            Do While Not stmInFile.EOS
-                strText = stmInFile.ReadText(-2)
-                If rxIndent.Test(strText) Then Exit Do
-            Loop
-            
-            ' We've moved on at least one line so restart the
-            ' regex testing when starting the loop again.
-            blnGetLine = False
-        
-        ' Skip blocks of code matching block pattern
-        ElseIf rxBlock.Test(strText) Then
-            Do While Not stmInFile.EOS
-                strText = stmInFile.ReadText(-2)
-                If InStr(strText, "End") Then Exit Do
-            Loop
-        
-        ' Check for report object
-        ElseIf InStr(1, strText, "Begin Report") = 1 Then
-            blnIsReport = True
-            cData.Add strText
-            cData.Add vbCrLf
-            
-        ' Watch for end of report (and skip these lines)
-        ElseIf blnIsReport And (InStr(1, strText, "    Right =") Or InStr(1, strText, "    Bottom =")) Then
-            If InStr(1, strText, "    Bottom =") Then blnIsReport = False
-        
-        ' Change version down to 20 to allow import into Access 2010.
-        ' (Haven't seen any significant issues with this.)
-        ElseIf strText = "Version =21" Then
-            cData.Add "Version =20"
-            cData.Add vbCrLf
-
-        ' Regular lines of data to add.
-        Else
-            cData.Add strText
-            cData.Add vbCrLf
-        End If
-        
-    Loop
-    
-    ' Close and delete original file
-    stmInFile.Close
-    FSO.DeleteFile strPath
-    
-    ' Write file all at once, rather than line by line.
-    ' (Otherwise the code can bog down with tens of thousands of write operations)
-    WriteFile cData.GetStr, strPath
-
-    ' Show stats if debug turned on.
-    Log.Add "    Sanitized in " & Format(Timer - sngOverall, "0.00") & " seconds.", Options.ShowDebug
-
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : SanitizeXML
-' Author    : Adam Waller
-' Date      : 4/27/2020
-' Purpose   : Remove non-essential data that changes every time the file is exported.
-'---------------------------------------------------------------------------------------
-'
-Public Sub SanitizeXML(strPath As String, Options As clsOptions)
-
-    Dim sngOverall As Single
-    Dim sngTimer As Single
-    Dim cData As clsConcat
-    Dim strText As String
-    Dim rxLine As VBScript_RegExp_55.RegExp
-    Dim objMatches As VBScript_RegExp_55.MatchCollection
-    Dim stmInFile As ADODB.Stream
-    Dim blnFound As Boolean
-    
-    On Error GoTo 0
-    
-    Set cData = New clsConcat
-    Set rxLine = New VBScript_RegExp_55.RegExp
-    
-    ' Timers to monitor performance
-    sngTimer = Timer
-    sngOverall = sngTimer
-    
-    ' Set line search pattern (To remove generated timestamp)
-    '<dataroot xmlns:od="urn:schemas-microsoft-com:officedata" generated="2020-04-27T10:28:32">
-    rxLine.Pattern = "^\s*(?:<dataroot xmlns:(.+))( generated="".+"")"
-    
-    ' Open file to read contents line by line.
-    Set stmInFile = New ADODB.Stream
-    stmInFile.Charset = "UTF-8"
-    stmInFile.Open
-    stmInFile.LoadFromFile strPath
-    strText = stmInFile.ReadText(-2)
-    
-    
-    ' Loop through all the lines in the file
-    Do Until stmInFile.EOS
-        
-        ' Read line from file
-        strText = stmInFile.ReadText(-2)
-        If Left(strText, 3) = "﻿" Then strText = Mid(strText, 4)
-        ' Just looking for the first match.
-        If Not blnFound Then
-        
-            ' Check for matching pattern
-            If rxLine.Test(strText) Then
-                
-                ' Return actual matches
-                Set objMatches = rxLine.Execute(strText)
-                
-                ' Replace with empty string
-                strText = Replace(strText, objMatches(0).SubMatches(1), vbNullString, , 1)
-                blnFound = True
-            End If
-        End If
-        
-        ' Add to return string
-        cData.Add strText
-        cData.Add vbCrLf
-    Loop
-    
-    ' Close and delete original file
-    stmInFile.Close
-    FSO.DeleteFile strPath
-    
-    ' Write file all at once, rather than line by line.
-    ' (Otherwise the code can bog down with tens of thousands of write operations)
-    WriteFile cData.GetStr, strPath
-
-    ' Show stats if debug turned on.
-    Log.Add "    Sanitized in " & Format(Timer - sngOverall, "0.00") & " seconds.", Options.ShowDebug
-
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : ProjectPath
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Path/Directory of the current database file.
-'---------------------------------------------------------------------------------------
-'
-Public Function ProjectPath() As String
-    ProjectPath = CurrentProject.Path
-    If Right(ProjectPath, 1) <> "\" Then ProjectPath = ProjectPath & "\"
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : MkDirIfNotExist
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Create folder `Path`. Silently do nothing if it already exists.
-'---------------------------------------------------------------------------------------
-'
-Public Sub MkDirIfNotExist(strPath As String)
-    If Not FSO.FolderExists(StripSlash(strPath)) Then MkDir StripSlash(strPath)
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : clearfilesbyextension
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Erase all *.`ext` files in `Path`.
-'---------------------------------------------------------------------------------------
-'
-Public Sub ClearFilesByExtension(ByVal strFolder As String, strExt As String)
-    If Not FSO.FolderExists(StripSlash(strFolder)) Then Exit Sub
-    If Dir(strFolder & "*." & strExt) <> "" Then
-        FSO.DeleteFile strFolder & "*." & strExt
-    End If
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : ClearTextFilesForFastSave
-' Author    : Adam Waller
-' Date      : 12/14/2016
-' Purpose   : Clears existing source files that don't have a matching object in the
-'           : database.
-'---------------------------------------------------------------------------------------
-'
-Public Sub ClearOrphanedSourceFiles(cType As IDbComponent, ParamArray StrExtensions())
-    
-    Dim oFolder As Scripting.Folder
-    Dim oFile As Scripting.File
-    Dim colNames As Collection
-    Dim strFile As String
-    Dim varExt As Variant
-    Dim strPrimaryExt As String
-    Dim cItem As IDbComponent
-    
-    ' No orphaned files if the folder doesn't exist.
-    If Not FSO.FolderExists(cType.BaseFolder) Then Exit Sub
-    
-    ' Cache a list of source file names for actual database objects
-    Set colNames = New Collection
-    For Each cItem In cType.GetAllFromDB
-        colNames.Add FSO.GetFileName(cItem.SourceFile)
-    Next cItem
-    If colNames.Count > 0 Then strPrimaryExt = "." & FSO.GetExtensionName(colNames(1))
-    
-    ' Loop through files in folder
-    Set oFolder = FSO.GetFolder(cType.BaseFolder)
-    For Each oFile In oFolder.Files
-    
-        ' Check against list of extensions
-        For Each varExt In StrExtensions
-        
-            ' Check for matching extension on wanted list.
-            If FSO.GetExtensionName(oFile.Path) = varExt Then
-                
-                ' Build a file name using the primary extension to
-                ' match the list of source files.
-                strFile = FSO.GetBaseName(oFile.Name) & strPrimaryExt
-                ' Remove any file that doesn't have a matching name.
-                If Not InCollection(colNames, strFile) Then
-                    ' Object not found in database. Remove file.
-                    Kill oFile.ParentFolder.Path & "\" & oFile.Name
-                    Log.Add "  Removing orphaned file: " & strFile, Options.ShowDebug
-                End If
-                
-                ' No need to check other extensions since we
-                ' already had a match and processed the file.
-                Exit For
-            End If
-        Next varExt
-    Next oFile
-    
-    ' Remove base folder if we don't have any files in it
-    If oFolder.Files.Count = 0 Then oFolder.Delete
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : StripSlash
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Strip the trailing slash
-'---------------------------------------------------------------------------------------
-'
-Public Function StripSlash(strText As String) As String
-    If Right(strText, 1) = "\" Then
-        StripSlash = Left(strText, Len(strText) - 1)
-    Else
-        StripSlash = strText
-    End If
-End Function
+' API function to pause processing
+Private Declare PtrSafe Sub Sleep Lib "kernel32" (ByVal dwMilliseconds As LongPtr)
 
 
 '---------------------------------------------------------------------------------------
@@ -432,7 +20,7 @@ End Function
 ' Purpose   : Returns true if the item value is found in the collection
 '---------------------------------------------------------------------------------------
 '
-Public Function InCollection(MyCol As Collection, MyValue) As Boolean
+Public Function InCollection(ByVal MyCol As Collection, ByVal MyValue As Variant) As Boolean
     Dim intCnt As Integer
     For intCnt = 1 To MyCol.Count
         If MyCol(intCnt) = MyValue Then
@@ -456,172 +44,6 @@ Public Sub MergeCollection(ByRef colOriginal As Collection, ByVal colToAdd As Co
         colOriginal.Add varItem
     Next varItem
 End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : VerifyPath
-' Author    : Adam Waller
-' Date      : 5/15/2015
-' Purpose   : Verifies that the path to a folder exists, caching results to
-'           : avoid uneeded calls to the Dir() function.
-'---------------------------------------------------------------------------------------
-'
-Public Sub VerifyPath(strFolderPath As String)
-    
-    Dim varPath As Variant
-    
-    ' Check cache first
-    For Each varPath In colVerifiedPaths
-        If strFolderPath = varPath Then
-            ' Found path. Assume it still exists
-            Exit Sub
-        End If
-    Next varPath
-    
-    ' If code reaches here, we don't have a copy of the path
-    ' in the cached list of verified paths. Verify and add
-    If Dir(strFolderPath, vbDirectory) = "" Then
-        ' Path does not seem to exist. Create it.
-        MkDirIfNotExist strFolderPath
-    End If
-    colVerifiedPaths.Add strFolderPath
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetDBProperty
-' Author    : Adam Waller
-' Date      : 9/1/2017
-' Purpose   : Get a database property (Default to MDB version)
-'---------------------------------------------------------------------------------------
-'
-Public Function GetDBProperty(strName As String) As Variant
-
-    Dim prp As Object ' DAO.Property
-    Dim oParent As Object
-    
-    ' Get parent container for properties
-    If CurrentProject.ProjectType = acADP Then
-        Set oParent = CurrentProject.Properties
-    Else
-        Set oParent = CurrentDb.Properties
-    End If
-    
-    ' Look for property by name
-    For Each prp In oParent
-        If prp.Name = strName Then
-            GetDBProperty = prp.Value
-            Exit For
-        End If
-    Next prp
-    Set prp = Nothing
-    
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : SetDBProperty
-' Author    : Adam Waller
-' Date      : 9/1/2017
-' Purpose   : Set a database property
-'---------------------------------------------------------------------------------------
-'
-Public Sub SetDBProperty(strName As String, varValue, Optional prpType = dbText)
-
-    Dim prp As Object ' DAO.Property
-    Dim blnFound As Boolean
-    Dim dbs As DAO.Database
-    Dim oParent As Object
-    
-    ' Properties set differently for databases and ADP projects
-    If CurrentProject.ProjectType = acADP Then
-        Set oParent = CurrentProject.Properties
-    Else
-        Set dbs = CurrentDb
-        Set oParent = dbs.Properties
-    End If
-    
-    ' Look for property in collection
-    For Each prp In oParent
-        If prp.Name = strName Then
-            ' Check for matching type
-            If Not dbs Is Nothing Then
-                If prp.Type <> prpType Then
-                    ' Remove so we can add it back in with the correct type.
-                    dbs.Properties.Delete strName
-                    Exit For
-                End If
-            End If
-            blnFound = True
-            ' Skip set on matching value
-            If prp.Value = varValue Then
-                Set dbs = Nothing
-            Else
-                ' Update value
-                prp.Value = varValue
-            End If
-            Exit Sub
-        End If
-    Next prp
-    
-    ' Add new property
-    If Not blnFound Then
-        If CurrentProject.ProjectType = acADP Then
-            CurrentProject.Properties.Add strName, varValue
-        Else
-            Set prp = dbs.CreateProperty(strName, prpType, varValue)
-            dbs.Properties.Append prp
-            Set dbs = Nothing
-        End If
-    End If
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : CloseAllFormsReports
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Close all open forms and reports. Returns true if successful.
-'---------------------------------------------------------------------------------------
-'
-Public Function CloseAllFormsReports() As Boolean
-
-    Dim strName As String
-    Dim intOpened As Integer
-    Dim intItem As Integer
-    
-    ' Get count of opened objects
-    intOpened = Forms.Count + Reports.Count
-    If intOpened > 0 Then
-        On Error GoTo ErrorHandler
-        ' Loop through forms
-        For intItem = Forms.Count - 1 To 0 Step -1
-            If Forms(intItem).Caption <> "MSAccessVCS" Then
-                DoCmd.Close acForm, Forms(intItem).Name
-                DoEvents
-            End If
-            intOpened = intOpened - 1
-        Next intItem
-        ' Loop through reports
-        Do While Reports.Count > 0
-            strName = Reports(0).Name
-            DoCmd.Close acReport, strName
-            DoEvents
-            intOpened = intOpened - 1
-        Loop
-        If intOpened = 0 Then CloseAllFormsReports = True
-    Else
-        ' No forms or reports currently open.
-        CloseAllFormsReports = True
-    End If
-    
-    Exit Function
-
-ErrorHandler:
-    Debug.Print "Error closing " & strName & ": " & Err.Number & vbCrLf & Err.Description
-End Function
 
 
 '---------------------------------------------------------------------------------------
@@ -652,61 +74,11 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Public Sub Shell2(strCmd As String)
-    Dim objShell As Object
-    Set objShell = CreateObject("WScript.Shell")
+    Dim objShell As WshShell
+    Set objShell = New WshShell
     objShell.Exec strCmd
     Set objShell = Nothing
 End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : WriteFile
-' Author    : Adam Waller
-' Date      : 1/23/2019
-' Purpose   : Save string variable to text file. (Building the folder path if needed)
-'---------------------------------------------------------------------------------------
-'
-Public Sub WriteFile(strContent As String, strPath As String)
-
-    Dim stm As New ADODB.Stream
-    
-    ' Make sure the path exists before we write a file.
-    VerifyPath FSO.GetParentFolderName(strPath)
-    
-    With stm
-        ' Use Unicode file encoding if needed.
-        If StringHasUnicode(strContent) Then
-            .Charset = "utf-8"
-        Else
-            ' Use ASCII text.
-            .Charset = "us-ascii"
-        End If
-        .Open
-        .WriteText strContent
-        ' Ensure that we are ending the content with a vbcrlf
-        If Right$(strContent, 2) <> vbCrLf Then .WriteText vbCrLf
-        .SaveToFile strPath, adSaveCreateOverWrite
-        .Close
-    End With
-    Set stm = Nothing
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : StringHasUnicode
-' Author    : Adam Waller
-' Date      : 3/6/2020
-' Purpose   : Returns true if the string contains non-ASCI characters.
-'---------------------------------------------------------------------------------------
-'
-Public Function StringHasUnicode(strText As String) As Boolean
-    Dim reg As New VBScript_RegExp_55.RegExp
-    With reg
-        .Pattern = "[^\u0000-\u007F]"
-        StringHasUnicode = .Test(strText)
-    End With
-End Function
 
 
 '---------------------------------------------------------------------------------------
@@ -772,126 +144,6 @@ End Function
 
 
 '---------------------------------------------------------------------------------------
-' Procedure : HasMoreRecentChanges
-' Author    : Adam Waller
-' Date      : 4/27/2020
-' Purpose   : Returns true if the database object has been modified more recently
-'           : than the exported file or source object.
-'---------------------------------------------------------------------------------------
-'
-Public Function HasMoreRecentChanges(objItem As IDbComponent) As Boolean
-    ' File dates could be a second off (between exporting the file and saving the report)
-    ' so ignore changes that are less than three seconds apart.
-    If objItem.DateModified > 0 And objItem.SourceModified > 0 Then
-        HasMoreRecentChanges = (DateDiff("s", objItem.DateModified, objItem.SourceModified) < -3)
-    Else
-        ' If we can't determine one or both of the dates, return true so the
-        ' item is processed as though more recent changes were detected.
-        HasMoreRecentChanges = True
-    End If
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : PreserveModificationStatusBeforeCompact
-' Author    : Adam Waller
-' Date      : 10/13/2017
-' Purpose   : Run this function before doing a compact/repair on the database to allow
-'           : quick saves (skipping unchanged files) even after the dates are reset
-'           : by the compact/repair operation.
-'---------------------------------------------------------------------------------------
-'
-Public Sub PreserveModificationStatusBeforeCompact()
-
-    Dim colContainers As New Collection
-    Dim obj As Object
-    Dim dbs As Database
-    Dim strValue As String
-    Dim varContainer As Variant
-    Dim dteOldest As Date
-    Dim dteCreated As Date
-    Dim dteModified As Date
-    Dim blnExport As Boolean
-    Dim dteLastCompact As Date
-    
-    ' Start with today and work backwards
-    dteOldest = Now
-    
-    ' Get date/time when the database was last compacted/repaired.
-    strValue = GetDBProperty("InitiatedCompactRepair")
-    If IsDate(strValue) Then dteLastCompact = CDate(strValue)
-    
-    ' Add object types to collection
-    With colContainers
-        If CurrentProject.ProjectType = acMDB Then
-            Set dbs = CurrentDb
-            .Add Forms
-            .Add Reports
-            '.Add dbs.QueryDefs
-            '.Add dbs.TableDefs
-            '.Add CurrentProject.AllMacros
-        Else
-            .Add CurrentProject.AllForms
-            .Add CurrentProject.AllReports
-            '.Add CurrentProject.AllMacros
-        End If
-    End With
-    
-    ' Go through each container
-    For Each varContainer In colContainers
-    
-        ' Loop through each object
-        For Each obj In varContainer
-        
-            ' Get creation and modified dates
-            dteCreated = obj.DateCreated
-            dteModified = obj.DateModified
-            
-            ' Default to needing to export the current object.
-            blnExport = True
-            
-            ' If dates match, the object has not changed since last compact/repair
-            If DatesClose(dteCreated, dteModified) And DatesClose(dteCreated, dteLastCompact, 20) Then
-                ' Sounds like this object has not changed.
-            Else
-                ' Changes were made since creation or modification.
-                ' Increment flag to force update on next export.
-                If GetChangeFlag(obj, 0) = 0 Then SetChangeFlag obj, 1
-            End If
-            
-            'Debug.Print obj. & " ";  & " " & obj.Name
-        Next obj
-        
-    Next varContainer
-
-    ' Save the current time at the database level
-    SetDBProperty "InitiatedCompactRepair", CStr(Now)
-    
-    ' Clean up
-    Set obj = Nothing
-    Set colContainers = Nothing
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetChangeFlag
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Get or set the custom change flag in a database object.
-'---------------------------------------------------------------------------------------
-'
-Public Function GetChangeFlag(obj As AccessObject, Optional intDefault As Integer) As Integer
-    Dim strValue As String
-    strValue = GetAccessObjectProperty(obj, "GitLabChangeFlag", CStr(intDefault))
-    If IsNumeric(strValue) Then GetChangeFlag = CInt(strValue)
-End Function
-Public Sub SetChangeFlag(obj As AccessObject, varValue As Variant)
-    SetAccessObjectProperty obj, "GitLabChangeFlag", CStr(varValue)
-End Sub
-
-
-'---------------------------------------------------------------------------------------
 ' Procedure : DatesClose
 ' Author    : Adam Waller
 ' Date      : 10/13/2017
@@ -901,64 +153,6 @@ End Sub
 '
 Public Function DatesClose(dte1 As Date, dte2 As Date, Optional lngMaxDiffSeconds As Long = 3) As Boolean
     DatesClose = (Abs(DateDiff("s", dte1, dte2)) < lngMaxDiffSeconds)
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : SetAccessObjectProperty
-' Author    : Adam Waller
-' Date      : 10/13/2017
-' Purpose   : Sets a custom access object property.
-'---------------------------------------------------------------------------------------
-'
-Public Sub SetAccessObjectProperty(objItem As AccessObject, strProperty As String, strValue As String)
-    Dim prp As AccessObjectProperty
-    For Each prp In objItem.Properties
-        If StrComp(prp.Name, strProperty, vbTextCompare) = 0 Then
-            ' Update value of property.
-            prp.Value = strValue
-            Exit Sub
-        End If
-    Next prp
-    ' Property not found. Create it.
-    objItem.Properties.Add strProperty, strValue
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetAccessObjectProperty
-' Author    : Adam Waller
-' Date      : 10/13/2017
-' Purpose   : Get the value of a custom access property
-'---------------------------------------------------------------------------------------
-'
-Public Function GetAccessObjectProperty(objItem As AccessObject, strProperty As String, Optional strDefault As String)
-    Dim prp As AccessObjectProperty
-    For Each prp In objItem.Properties
-        If StrComp(prp.Name, strProperty, vbTextCompare) = 0 Then
-            GetAccessObjectProperty = prp.Value
-            Exit Function
-        End If
-    Next prp
-    ' Nothing found. Return default
-    GetAccessObjectProperty = strDefault
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : StripDboPrefix
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Removes the dbo prefix, as sometimes encountered with ADP projects
-'           : depending on the sql permissions of the current user.
-'---------------------------------------------------------------------------------------
-'
-Public Function StripDboPrefix(strName As String) As String
-    If Left(strName, 4) = "dbo." Then
-        StripDboPrefix = Mid(strName, 5)
-    Else
-        StripDboPrefix = strName
-    End If
 End Function
 
 
@@ -985,128 +179,10 @@ End Function
 ' Purpose   : Show the VBA code editor (used in autoexec macro)
 '---------------------------------------------------------------------------------------
 '
-Public Function ShowIDE()
+Public Function ShowIDE() As Boolean
     DoCmd.RunCommand acCmdVisualBasicEditor
     DoEvents
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : ProgramFilesFolder
-' Author    : Adam Waller
-' Date      : 5/15/2015
-' Purpose   : Returns the program files folder on the OS. (32 or 64 bit)
-'---------------------------------------------------------------------------------------
-'
-Public Function ProgramFilesFolder() As String
-    Dim strFolder As String
-    strFolder = Environ$("PROGRAMFILES")
-    ' Should always work, but just in case!
-    If strFolder = "" Then strFolder = "C:\Program Files (x86)"
-    ProgramFilesFolder = strFolder & "\"
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : ProjectIsSelected
-' Author    : Adam Waller
-' Date      : 5/15/2015
-' Purpose   : Returns true if the base project is selected in the VBE
-'---------------------------------------------------------------------------------------
-'
-Public Function ProjectIsSelected() As Boolean
-    ProjectIsSelected = (Application.VBE.SelectedVBComponent Is Nothing)
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : SelectionInActiveProject
-' Author    : Adam Waller
-' Date      : 5/15/2015
-' Purpose   : Returns true if the current selection is in the active project
-'---------------------------------------------------------------------------------------
-'
-Public Function SelectionInActiveProject() As Boolean
-    SelectionInActiveProject = (Application.VBE.ActiveVBProject.FileName = UncPath(CurrentProject.FullName))
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : UncPath
-' Author    : Adam Waller
-' Date      : 5/18/2015
-' Purpose   : Returns the UNC path of a mapped network drive, if applicable
-'---------------------------------------------------------------------------------------
-'
-Public Function UncPath(strPath As String) As String
-    
-    Dim strDrive As String
-    Dim strShare As String
-    
-    ' Identify drive letter and share name
-    With FSO
-        strDrive = .GetDriveName(.GetAbsolutePathName(strPath))
-        strShare = .GetDrive(strDrive).ShareName
-    End With
-    
-    If strShare <> "" Then
-        ' Replace drive with UNC path
-        UncPath = strShare & Mid(strPath, Len(strDrive) + 1)
-    Else
-        ' Return unmodified path
-        UncPath = strPath
-    End If
-        
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : IsLoaded
-' Author    : Adam Waller
-' Date      : 9/22/2017
-' Purpose   : Returns true if the object is loaded and not in design view.
-'---------------------------------------------------------------------------------------
-'
-Public Function IsLoaded(intType As AcObjectType, strName As String, Optional blnAllowDesignView As Boolean = False) As Boolean
-
-    Dim frm As Form
-    Dim ctl As Control
-    
-    If SysCmd(acSysCmdGetObjectState, intType, strName) <> adStateClosed Then
-        If blnAllowDesignView Then
-            IsLoaded = True
-        Else
-            Select Case intType
-                Case acReport
-                    IsLoaded = Reports(strName).CurrentView <> acCurViewDesign
-                Case acForm
-                    IsLoaded = Forms(strName).CurrentView <> acCurViewDesign
-                Case acServerView
-                    IsLoaded = CurrentData.AllViews(strName).CurrentView <> acCurViewDesign
-                Case acStoredProcedure
-                    IsLoaded = CurrentData.AllStoredProcedures(strName).CurrentView <> acCurViewDesign
-                Case Else
-                    ' Other unsupported object
-                    IsLoaded = True
-            End Select
-        End If
-    Else
-        ' Could be loaded as subform
-        If intType = acForm Then
-            For Each frm In Forms
-                For Each ctl In frm.Controls
-                    If TypeOf ctl Is SubForm Then
-                        If ctl.SourceObject = strName Then
-                            IsLoaded = True
-                            Exit For
-                        End If
-                    End If
-                Next ctl
-                If IsLoaded Then Exit For
-            Next frm
-        End If
-    End If
-    
+    ShowIDE = True
 End Function
 
 
@@ -1121,6 +197,11 @@ Public Function MsgBox2(strBold As String, Optional strLine1 As String, Optional
     
     Dim strMsg As String
     Dim varLines(0 To 3) As String
+    Dim intCursor As Integer
+    
+    ' Turn off any hourglass
+    intCursor = Screen.MousePointer
+    If intCursor > 0 Then Screen.MousePointer = 0
     
     ' Escape single quotes by doubling them.
     varLines(0) = Replace(strBold, "'", "''")
@@ -1128,549 +209,12 @@ Public Function MsgBox2(strBold As String, Optional strLine1 As String, Optional
     varLines(2) = Replace(strLine2, "'", "''")
     varLines(3) = Replace(strTitle, "'", "''")
     
-    If varLines(3) = "" Then varLines(3) = Application.VBE.ActiveVBProject.Name
+    If varLines(3) = vbNullString Then varLines(3) = Application.VBE.ActiveVBProject.Name
     strMsg = "MsgBox('" & varLines(0) & "@" & varLines(1) & "@" & varLines(2) & "@'," & intButtons & ",'" & varLines(3) & "')"
     MsgBox2 = Eval(strMsg)
     
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : LoadOptions
-' Author    : Adam Waller
-' Date      : 4/15/2020
-' Purpose   : Loads the current options from defaults and this project.
-'---------------------------------------------------------------------------------------
-'
-Public Function LoadOptions() As clsOptions
-    Dim Options As clsOptions
-    Set Options = New clsOptions
-    Options.LoadDefaultOptions
-    Options.LoadProjectOptions
-    Set LoadOptions = Options
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : Options
-' Author    : Adam Waller
-' Date      : 5/2/2020
-' Purpose   : A global property to access options from anywhere in code.
-'           : (Avoiding a global state is better OO programming, but this approach keeps
-'           :  the coding simpler when you don't have to tie everything back to the
-'           :  primary object.) I.e. You can just use `Encrypt("text")` instead of
-'           :  having to use `Options.Encrypt("text")`
-'           : To clear the current set of options, simply set the property to nothing.
-'---------------------------------------------------------------------------------------
-'
-Public Property Get Options() As clsOptions
-    If m_Options Is Nothing Then Set m_Options = LoadOptions
-    Set Options = m_Options
-End Property
-Public Property Set Options(cNewOptions As clsOptions)
-    Set m_Options = cNewOptions
-End Property
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetVCSVersion
-' Author    : Adam Waller
-' Date      : 1/28/2019
-' Purpose   : Gets the version of the version control system. (Used to turn off fast
-'           : save until a full export has been run with the current version of
-'           : the MSAccessVCS addin.)
-'---------------------------------------------------------------------------------------
-'
-Public Function GetVCSVersion() As String
-
-    Dim dbs As Database
-    Dim prp As DAO.Property
-
-    Set dbs = CodeDb
-
-    For Each prp In dbs.Properties
-        If prp.Name = "AppVersion" Then
-            ' Return version
-            GetVCSVersion = prp.Value
-        End If
-    Next prp
-
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetVBProjectForCurrentDB
-' Author    : Adam Waller
-' Date      : 7/25/2017
-' Purpose   : Get the actual VBE project for the current top-level database.
-'           : (This is harder than you would think!)
-'---------------------------------------------------------------------------------------
-'
-Public Function GetVBProjectForCurrentDB() As VBProject
-    Set GetVBProjectForCurrentDB = GetProjectByName(CurrentProject.FullName)
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetCodeVBProject
-' Author    : Adam Waller
-' Date      : 4/24/2020
-' Purpose   : Get a reference to the VB Project for the running code.
-'---------------------------------------------------------------------------------------
-'
-Public Function GetCodeVBProject() As VBProject
-    Set GetCodeVBProject = GetProjectByName(CodeProject.FullName)
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetProjectByName
-' Author    : Adam Waller
-' Date      : 5/26/2020
-' Purpose   : Return the VBProject by file path.
-'---------------------------------------------------------------------------------------
-'
-Private Function GetProjectByName(ByVal strPath As String) As VBProject
-
-    Dim objProj As VBIDE.VBProject
-        
-    ' Use currently active project by default
-    Set GetProjectByName = VBE.ActiveVBProject
-    
-    If VBE.ActiveVBProject.FileName <> strPath Then
-        ' Search for project with matching filename.
-        For Each objProj In VBE.VBProjects
-            If objProj.FileName = strPath Then
-                Set GetProjectByName = objProj
-                Exit For
-            End If
-        Next objProj
-    End If
-    
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : RunInCurrentProject
-' Author    : Adam Waller
-' Date      : 4/22/2020
-' Purpose   : Use the Run command but make sure it is running in the context of the
-'           : current project, not the add-in file.
-'---------------------------------------------------------------------------------------
-'
-Public Sub RunSubInCurrentProject(strSubName As String)
-
-    Dim strCmd As String
-    
-    ' Don't need the parentheses after the sub name
-    strCmd = Replace(strSubName, "()", "")
-    
-    ' Make sure we are not trying to run a function with arguments
-    If InStr(strCmd, "(") > 0 Then
-        MsgBox2 "Unable to Run Command", _
-            "Parameters are not supported for this command.", _
-            "If you need to use parameters, please create a wrapper sub or function with" & vbCrLf & _
-            "no parameters that you can call instead of " & strSubName & ".", vbExclamation
-        Exit Sub
-    End If
-    
-    ' Add project name so we can run it from the current datbase
-    strCmd = "[" & GetVBProjectForCurrentDB.Name & "]." & strCmd
-    
-    ' Run the sub
-    Application.Run strCmd
-
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetFilePathsInFolder
-' Author    : Adam Waller
-' Date      : 4/23/2020
-' Purpose   : Returns a collection containing the full paths of files in a folder.
-'---------------------------------------------------------------------------------------
-'
-Public Function GetFilePathsInFolder(strDirPath As String, Optional Attributes As VbFileAttribute = vbNormal) As Collection
-    
-    Dim strBaseFolder As String
-    Dim strFile As String
-    
-    strBaseFolder = FSO.GetParentFolderName(strDirPath) & "\"
-    Set GetFilePathsInFolder = New Collection
-    strFile = Dir(strDirPath, Attributes)
-    Do While strFile <> vbNullString
-        GetFilePathsInFolder.Add strBaseFolder & strFile
-        strFile = Dir()
-    Loop
-    
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : WriteJsonFile
-' Author    : Adam Waller
-' Date      : 4/24/2020
-' Purpose   : Creates a json file with an info header giving some clues about the
-'           : contents of the file. (Helps with upgrades or changes later.)
-'---------------------------------------------------------------------------------------
-'
-Public Sub WriteJsonFile(ClassMe As Object, dItems As Scripting.Dictionary, strFile As String, strDescription As String)
-    
-    Dim dContents As Scripting.Dictionary
-    Dim dHeader As Scripting.Dictionary
-    
-    Set dContents = New Scripting.Dictionary
-    Set dHeader = New Scripting.Dictionary
-    
-    ' Build dictionary structure
-    dHeader.Add "Class", TypeName(ClassMe)
-    dHeader.Add "Description", strDescription
-    dHeader.Add "VCS Version", GetVCSVersion
-    dContents.Add "Info", dHeader
-    dContents.Add "Items", dItems
-    
-    ' Write to file in Json format
-    WriteFile ConvertToJson(dContents, JSON_WHITESPACE), strFile
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : ReadJsonFile
-' Author    : Adam Waller
-' Date      : 5/5/2020
-' Purpose   : Reads a Json file into a dictionary object
-'---------------------------------------------------------------------------------------
-'
-Public Function ReadJsonFile(strPath As String) As Dictionary
-    Dim strText As String
-    Dim stm As ADODB.Stream
-    
-    If FSO.FileExists(strPath) Then
-        Set stm = New ADODB.Stream
-        With stm
-            .Charset = "UTF-8"
-            .Open
-            .LoadFromFile strPath
-            strText = .ReadText
-            .Close
-        End With
-        
-        ' If it looks like json content, then parse into a dictionary object.
-        If Left(strText, 3) = "﻿" Then strText = Mid(strText, 4)
-        If Left(strText, 1) = "{" Then Set ReadJsonFile = ParseJson(strText)
-    End If
-    
-    Set stm = Nothing
-    
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetSQLObjectModifiedDate
-' Author    : Adam Waller
-' Date      : 10/11/2017
-' Purpose   : Get the last modified date for the SQL object
-'---------------------------------------------------------------------------------------
-'
-Public Function GetSQLObjectModifiedDate(strName As String, eType As eSqlObjectType) As Date
-
-    ' Use static variables so we can avoid hundreds of repeated calls
-    ' for the same object type. Instead use a local array after
-    ' pulling the initial values.
-    ' (Makes a significant performance gain in complex databases)
-    Static colCache As Collection
-    Static strLastType As String
-    Static dteCacheDate As Date
-
-    Dim rst As ADODB.Recordset
-    Dim strSQL As String
-    Dim strObject As String
-    Dim strTypeFilter As String
-    Dim intPos As Integer
-    Dim strSchema As String
-    Dim varItem As Variant
-    Dim strType As String
-    
-    ' Shortcut to clear the cached variable
-    If strName = "" And strType = "" Then
-        Set colCache = Nothing
-        strLastType = ""
-        dteCacheDate = 0
-        Exit Function
-    End If
-    
-    ' Only try this on ADP projects
-    If CurrentProject.ProjectType <> acADP Then Exit Function
-    
-    ' Simple validation on object name
-    strObject = Replace(strName, ";", "")
-    
-    ' Build schema filter if required
-    intPos = InStr(1, strObject, ".")
-    If intPos > 0 Then
-        strObject = Mid(strObject, intPos + 1)
-        strSchema = Left(strName, intPos - 1)
-        'strSchemaFilter = " AND [schema_id]=schema_id('" & strSchema & "')"
-    Else
-        strSchema = "dbo"
-    End If
-    
-    ' Build type filter
-    Select Case eType
-        Case estView: strType = "V"
-        Case estStoredProcedure: strType = "P"
-        Case estTable: strType = "U"
-        Case estTrigger: strType = "TR"
-    End Select
-    If strType <> vbNullString Then strTypeFilter = " AND [type]='" & strType & "'"
-    
-    ' Check to see if we have already cached the results
-    If strType = strLastType And (DateDiff("s", dteCacheDate, Now()) < 5) And Not colCache Is Nothing Then
-        ' Look through cache to find matching date
-        For Each varItem In colCache
-            If varItem(0) = strName Then
-                GetSQLObjectModifiedDate = varItem(1)
-                Exit For
-            End If
-        Next varItem
-    Else
-        ' Look up from query, and cache results
-        Set colCache = New Collection
-        dteCacheDate = Now()
-        strLastType = strType
-        
-        ' Build SQL query to find object
-        strSQL = "SELECT [name], schema_name([schema_id]) as [schema], modify_date FROM sys.objects WHERE 1=1 " & strTypeFilter
-        Set rst = New ADODB.Recordset
-        With rst
-            .Open strSQL, CurrentProject.Connection, adOpenForwardOnly, adLockReadOnly
-            Do While Not .EOF
-                ' Return date when name matches. (But continue caching additional results)
-                If Nz(!Name) = strObject And Nz(!schema) = strSchema Then GetSQLObjectModifiedDate = Nz(!modify_date)
-                If Nz(!schema) = "dbo" Then
-                    colCache.Add Array(Nz(!Name), Nz(!modify_date))
-                Else
-                    ' Include schema name in object name
-                    colCache.Add Array(Nz(!schema) & "." & Nz(!Name), Nz(!modify_date))
-                End If
-                .MoveNext
-            Loop
-            .Close
-        End With
-        Set rst = Nothing
-    End If
-    
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetSQLObjectDefinitionForADP
-' Author    : awaller
-' Date      : 12/12/2016
-' Purpose   : Returns the SQL definition for the ADP project item.
-'           : (Queries, Views, Tables, etc... are not stored in Access but on the
-'           :  SQL server.)
-'           : NOTE: This takes a simplistic approach, which does not guard againts
-'           : certain types of SQL injection attacks. Use at your own risk!
-'---------------------------------------------------------------------------------------
-'
-Public Function GetSQLObjectDefinitionForADP(strName As String) As String
-    
-    Dim rst As ADODB.Recordset
-    Dim strSQL As String
-    Dim strObject As String
-    
-    ' Only try this on ADP projects
-    If CurrentProject.ProjectType <> acADP Then Exit Function
-    
-    ' Simple validation on object name
-    strObject = Replace(strName, ";", "")
-    
-    strSQL = "SELECT object_definition (OBJECT_ID(N'" & strObject & "'))"
-    Set rst = CurrentProject.Connection.Execute(strSQL)
-    If Not rst.EOF Then
-        ' Get SQL definition
-        GetSQLObjectDefinitionForADP = Nz(rst(0).Value)
-    End If
-    
-    Set rst = Nothing
-    
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : Log
-' Author    : Adam Waller
-' Date      : 4/28/2020
-' Purpose   :
-'---------------------------------------------------------------------------------------
-'
-Public Function Log() As clsLog
-    If m_Log Is Nothing Then Set m_Log = New clsLog
-    Set Log = m_Log
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : FSO
-' Author    : Adam Waller
-' Date      : 1/18/2019
-' Purpose   : Wrapper for file system object. A property allows us to clear the object
-'           : reference when we have completed an export or import operation.
-'---------------------------------------------------------------------------------------
-'
-Public Property Get FSO() As Scripting.FileSystemObject
-    If m_FSO Is Nothing Then Set m_FSO = New Scripting.FileSystemObject
-    Set FSO = m_FSO
-End Property
-Public Property Set FSO(ByVal RHS As Scripting.FileSystemObject)
-    Set m_FSO = RHS
-End Property
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : SaveComponentAsText
-' Author    : Adam Waller
-' Date      : 4/29/2020
-' Purpose   : Wrapper for Application.SaveAsText that verifies that the path exists,
-'           : and then removes any existing file before saving the object as text.
-'---------------------------------------------------------------------------------------
-'
-Public Sub SaveComponentAsText(intType As AcObjectType, strName As String, strFile As String)
-    
-    Dim strTempFile As String
-    
-    ' Make sure the path exists before we write a file.
-    VerifyPath FSO.GetParentFolderName(strFile)
-        
-    ' Export to temporary file
-    strTempFile = GetTempFile
-    
-    Application.SaveAsText intType, strName, strTempFile
-    
-    ' Handle UCS conversion if needed
-    ConvertUcs2Utf8 strTempFile, strFile
-    
-    ' Sanitize certain object types
-    Select Case intType
-        Case acForm, acReport, acQuery, acMacro
-            SanitizeFile strFile
-    End Select
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : LoadComponentFromText
-' Author    : Adam Waller
-' Date      : 5/5/2020
-' Purpose   : Load the object into the database from the saved source file.
-'---------------------------------------------------------------------------------------
-'
-Public Sub LoadComponentFromText(intType As AcObjectType, strName As String, strFile As String)
-
-    Dim strTempFile As String
-    Dim blnConvert As Boolean
-    
-    ' Check UCS-2-LE requirement for the current database.
-    ' (Cached after first call)
-    Select Case intType
-        Case acForm, acReport, acQuery, acMacro, acTableDataMacro
-            blnConvert = RequiresUcs2
-    End Select
-    
-    ' Only run conversion if needed.
-    If blnConvert Then
-        ' Perform file conversion, and import from temp file.
-        strTempFile = GetTempFile
-        ConvertUtf8Ucs2 strFile, strTempFile
-        Application.LoadFromText intType, strName, strTempFile
-        Kill strTempFile
-    Else
-        ' Load UTF-8 file
-        Application.LoadFromText intType, strName, strFile
-    End If
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : EncryptPath
-' Author    : Adam Waller
-' Date      : 5/1/2020
-' Purpose   : Encrypts just the folder path, not the filename.
-'---------------------------------------------------------------------------------------
-'
-Public Function EncryptPath(strPath As String) As String
-    
-    Dim strParent As String
-    
-    strParent = FSO.GetParentFolderName(strPath)
-    If strParent = vbNullString Then
-        ' Could be relative path or just a filename
-        EncryptPath = strPath
-    Else
-        EncryptPath = Encrypt(strParent) & "\" & FSO.GetFileName(strPath)
-    End If
-    
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : FolderHasVcsOptionsFile
-' Author    : Adam Waller
-' Date      : 5/5/2020
-' Purpose   : Returns true if the folder as a vcs-options.json file, which is required
-'           : to build a project from source files.
-'---------------------------------------------------------------------------------------
-'
-Public Function FolderHasVcsOptionsFile(strFolder As String) As Boolean
-    FolderHasVcsOptionsFile = FSO.FileExists(StripSlash(strFolder) & "\vcs-options.json")
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetOriginalDbFullPathFromSource
-' Author    : Adam Waller
-' Date      : 5/5/2020
-' Purpose   : Determine the original full path of the database, based on the files
-'           : in the source folder.
-'---------------------------------------------------------------------------------------
-'
-Public Function GetOriginalDbFullPathFromSource(strFolder As String) As String
-    
-    Dim strPath As String
-    Dim dContents As Dictionary
-    Dim strFile As String
-    
-    strPath = StripSlash(strFolder) & "\vbe-project.json"
-    If FSO.FileExists(strPath) Then
-        Set dContents = ReadJsonFile(strPath)
-        strFile = Decrypt(dNZ(dContents, "Items\FileName"))
-        If Left(strFile, 4) = "rel:" Then
-            ' Use parent folder of source folder
-            GetOriginalDbFullPathFromSource = StripSlash(strFolder) & "\..\" & FSO.GetFileName(Mid$(strFile, 5))
-        ElseIf InStr(1, strFile, "@{") > 0 Then
-            ' Decryption failed.
-            ' We might be able to figure out a relative path from the export path.
-            strPath = StripSlash(strFolder) & "\vcs-options.json"
-            If FSO.FileExists(strPath) Then
-                Set dContents = ReadJsonFile(strPath)
-                ' Make sure we can read something, but that the export folder is blank.
-                ' (Default, which indicates that it would be in the parent folder of the
-                '  source directory.)
-                If dNZ(dContents, "Info\AddinVersion") <> vbNullString _
-                    And dNZ(dContents, "Options\ExportFolder") = vbNullString Then
-                    ' Use parent folder of source directory
-                    GetOriginalDbFullPathFromSource = StripSlash(strFolder) & "\..\" & FSO.GetFileName(strFile)
-                End If
-            End If
-        Else
-            ' Return full path to file.
-            GetOriginalDbFullPathFromSource = strFile
-        End If
-    End If
+    ' Restore MousePointer (if needed)
+    If intCursor > 0 Then Screen.MousePointer = intCursor
     
 End Function
 
@@ -1749,14 +293,38 @@ End Function
 
 
 '---------------------------------------------------------------------------------------
-' Procedure : TableExists
+' Procedure : SortCollection
 ' Author    : Adam Waller
-' Date      : 5/7/2020
-' Purpose   : Returns true if the table object is found in the dabase.
+' Date      : 11/14/2020
+' Purpose   : Sort a collection of items by value. (Returns a new sorted collection)
 '---------------------------------------------------------------------------------------
 '
-Public Function TableExists(strName As String) As Boolean
-    TableExists = Not (DCount("*", "MSysObjects", "Name=""" & strName & """ AND Type=1") = 0)
+Public Function SortCollectionByValue(colSource As Collection) As Collection
+
+    Dim colSorted As Collection
+    Dim varItems() As Variant
+    Dim lngCnt As Long
+    
+    ' Don't need to sort empty collection or single item
+    If colSource.Count < 2 Then
+        Set SortCollectionByValue = colSource
+        Exit Function
+    End If
+    
+    ' Build and sort array of keys
+    ReDim varItems(0 To colSource.Count - 1)
+    For lngCnt = 0 To UBound(varItems)
+        varItems(lngCnt) = colSource(lngCnt + 1)
+    Next lngCnt
+    QuickSort varItems
+    
+    ' Build and return new collection using sorted values
+    Set colSorted = New Collection
+    For lngCnt = 0 To UBound(varItems)
+        colSorted.Add varItems(lngCnt)
+    Next lngCnt
+    Set SortCollectionByValue = colSorted
+    
 End Function
 
 
@@ -1787,13 +355,15 @@ Public Function SortDictionaryByKeys(dSource As Dictionary) As Dictionary
         varKeys(lngCnt) = varKey
         lngCnt = lngCnt + 1
     Next varKey
+    
     QuickSort varKeys
     
     ' Build and return new dictionary using sorted keys
     Set dSorted = New Dictionary
-    For lngCnt = 0 To UBound(varKeys)
+    For lngCnt = 0 To dSource.Count - 1
         dSorted.Add varKeys(lngCnt), dSource(varKeys(lngCnt))
     Next lngCnt
+    
     Set SortDictionaryByKeys = dSorted
     
 End Function
@@ -1807,7 +377,7 @@ End Function
 ' Usage     : QuickSort MyArray
 '---------------------------------------------------------------------------------------
 '
-Public Sub QuickSort(vArray As Variant, Optional inLow, Optional inHi)
+Public Sub QuickSort(ByRef vArray As Variant, Optional ByVal inLow, Optional ByVal inHi)
 
     Dim pivot   As Variant
     Dim tmpSwap As Variant
@@ -1847,142 +417,201 @@ End Sub
 
 
 '---------------------------------------------------------------------------------------
-' Procedure : SetDAOProperty
+' Procedure : DictionaryEqual
 ' Author    : Adam Waller
-' Date      : 5/8/2020
-' Purpose   : Updates a DAO property, adding if it does not exist or is the wrong type.
+' Date      : 6/2/2020
+' Purpose   : Returns true if the two dictionary objects are equal in values to each
+'           : other, including nested values. Testing the quickest comparisons first
+'           : to make the function as performant as possible.
 '---------------------------------------------------------------------------------------
 '
-Public Sub SetDAOProperty(objParent As Object, intType As Integer, strName As String, varValue As Variant)
+Public Function DictionaryEqual(dOne As Dictionary, dTwo As Dictionary) As Boolean
 
-    Dim prp As DAO.Property
-    Dim blnFound As Boolean
+    Dim strOne As String
+    Dim strTwo As String
+    Dim blnEqual As Boolean
     
-    ' Look through existing properties.
-    For Each prp In objParent.Properties
-        If prp.Name = strName Then
-            blnFound = True
-            Exit For
-        End If
-    Next prp
-
-    ' Verify type, and update value if found.
-    If blnFound Then
-        If prp.Type <> intType Then
-            objParent.Properties.Delete strName
-            blnFound = False
-        Else
-            If objParent.Properties(strName).Value <> varValue Then
-                objParent.Properties(strName).Value = varValue
+    Perf.OperationStart "Compare Dictionary"
+    If dOne Is Nothing And dTwo Is Nothing Then
+        ' Neither object set.
+        blnEqual = True
+    ElseIf Not dOne Is Nothing And Not dTwo Is Nothing Then
+        ' Both are objects. Check count property.
+        If dOne.Count = dTwo.Count Then
+            strOne = ConvertToJson(dOne)
+            strTwo = ConvertToJson(dTwo)
+            ' Compare string length
+            If Len(strOne) = Len(strTwo) Then
+                ' Perform a binary (case-sensitive) comparison of strings.
+                blnEqual = (StrComp(strOne, strTwo, vbBinaryCompare) = 0)
             End If
         End If
     End If
-        
-    ' Add new property if needed
-    If Not blnFound Then
-        ' Create property, then append to collection
-        Set prp = objParent.CreateProperty(strName, intType, varValue)
-        objParent.Properties.Append prp
-    End If
+    Perf.OperationEnd
+    
+    ' Return comparison result
+    DictionaryEqual = blnEqual
+    
+End Function
 
+
+'---------------------------------------------------------------------------------------
+' Procedure : Pause
+' Author    : Adam Waller
+' Date      : 6/3/2020
+' Purpose   : Pause the code execution for x seconds.
+'---------------------------------------------------------------------------------------
+'
+Public Sub Pause(sngSeconds As Single)
+    Sleep sngSeconds * 1000
 End Sub
 
 
 '---------------------------------------------------------------------------------------
-' Procedure : GetRelativePath
+' Procedure : Catch
 ' Author    : Adam Waller
-' Date      : 5/11/2020
-' Purpose   : Returns a path relative to current database.
-'           : If a relative path is not possible, it returns an empty string
+' Date      : 11/23/2020
+' Purpose   : Returns true if the last error matches any of the passed error numbers,
+'           : and clears the error object.
 '---------------------------------------------------------------------------------------
 '
-Public Function GetRelativePath(strPath As String) As String
-    
-    Dim strFolder As String
-    
-    ' Check for matching parent folder as relative to the project path.
-    strFolder = CurrentProject.Path & "\"
-    If InStr(1, strPath, strFolder, vbTextCompare) = 1 Then
-        ' In export folder or subfolder. Simple replacement
-        GetRelativePath = "rel:" & Mid$(strPath, Len(strFolder) + 1)
+Public Function Catch(ParamArray lngErrorNumbers()) As Boolean
+    Dim intCnt As Integer
+    For intCnt = LBound(lngErrorNumbers) To UBound(lngErrorNumbers)
+        If lngErrorNumbers(intCnt) = Err.Number Then
+            Err.Clear
+            Catch = True
+            Exit For
+        End If
+    Next intCnt
+End Function
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : CatchAny
+' Author    : Adam Waller
+' Date      : 12/3/2020
+' Purpose   : Generic error handler with logging.
+'---------------------------------------------------------------------------------------
+'
+Public Function CatchAny(eLevel As eErrorLevel, strDescription As String, Optional strSource As String, _
+    Optional blnLogError As Boolean = True, Optional blnClearError As Boolean = True) As Boolean
+    If Err Then
+        If blnLogError Then Log.Error eLevel, strDescription, strSource
+        If blnClearError Then Err.Clear
+        CatchAny = True
     End If
+End Function
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : Largest
+' Author    : Adam Waller
+' Date      : 12/2/2020
+' Purpose   : Return the largest of an array of values
+'---------------------------------------------------------------------------------------
+'
+Public Function Largest(ParamArray varValues()) As Variant
+
+    Dim varLargest As Variant
+    Dim intCnt As Integer
+    
+    For intCnt = LBound(varValues) To UBound(varValues)
+        If varLargest < varValues(intCnt) Then varLargest = varValues(intCnt)
+    Next intCnt
+    Largest = varLargest
 
 End Function
 
 
 '---------------------------------------------------------------------------------------
-' Procedure : GetPathFromRelative
+' Procedure : ZN
 ' Author    : Adam Waller
-' Date      : 5/11/2020
-' Purpose   : Expands a relative path out to the full path.
+' Date      : 12/2/2020
+' Purpose   : Opposite of the NZ function, where we convert an empty string or 0 to null.
 '---------------------------------------------------------------------------------------
 '
-Public Function GetPathFromRelative(strPath As String) As String
-    If Left$(strPath, 4) = "rel:" Then
-        GetPathFromRelative = CurrentProject.Path & "\" & Mid$(strPath, 5)
+Public Function ZN(varValue As Variant) As Variant
+    If varValue = vbNullString Or varValue = 0 Then
+        ZN = Null
     Else
-        ' No relative path used.
-        GetPathFromRelative = strPath
+        ZN = varValue
     End If
 End Function
 
 
-Public Sub TestPrinterFunctions()
-
-    Dim cPrinter As New clsDevMode
-    Dim dPrinter As Dictionary
-    
-    With cPrinter
-        .LoadFromPrinter ("C552 Color")
-        Set dPrinter = .GetDictionary
-        .LoadFromExportFile "C:\Users\awaller.IAA\Documents\GitHub\msaccess-vcs-integration\Testing\Testing.accdb.src\reports\rptDefaultPrinter.bas"
-        'Debug.Print ConvertToJson(dPrinter, 4)
-        
-    End With
-End Sub
-
-
 '---------------------------------------------------------------------------------------
-' Procedure : SortDictionaryByKey
-' Author    : Adapted by Casper Englund
-' Date      : 2020/05/28
-' Purpose   : Sort a dictionary by key name - If automation error happens visit
-'             https://stackoverflow.com/questions/40625618/automation-error-2146232576-80131700-on-creating-an-array
+' Procedure : ZNDate
+' Author    : Adam Waller
+' Date      : 12/4/2020
+' Purpose   : Return null for an empty date value
 '---------------------------------------------------------------------------------------
 '
-Public Function SortDictionaryByKey(dict As Object, Optional sortDescending As Boolean) As Dictionary
-    
-    Dim arrList As ArrayList
-    Set arrList = New ArrayList
-    
-    ' Put keys in an ArrayList
-    Dim key As Variant, coll As New Collection
-    For Each key In dict
-        arrList.Add key
-    Next key
-    
-    ' Sort the keys
-    arrList.Sort
-    
-    ' For descending order, reverse
-    If sortDescending Then
-        arrList.Reverse
+Public Function ZNDate(varValue As Variant) As Variant
+    Dim blnDateValue As Boolean
+    If IsDate(varValue) Then blnDateValue = (CDate(varValue) <> 0)
+    If blnDateValue Then
+        ZNDate = varValue
+    Else
+        ZNDate = Null
     End If
-    
-    ' Create new dictionary
-    Dim dictNew As Object
-    Set dictNew = CreateObject("Scripting.Dictionary")
-    
-    ' Read through the sorted keys and add to new dictionary
-    For Each key In arrList
-        dictNew.Add key, dict(key)
-    Next key
-    
-    ' Clean up
-    Set arrList = Nothing
-    Set dict = Nothing
-    
-    ' Return the new dictionary
-    Set SortDictionaryByKey = dictNew
-        
+End Function
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : PathSep
+' Author    : Adam Waller
+' Date      : 3/3/2021
+' Purpose   : Return the current path separator, based on language settings.
+'           : Caches value to avoid extra calls to FSO object.
+'---------------------------------------------------------------------------------------
+'
+Public Function PathSep() As String
+    Static strSeparator As String
+    If strSeparator = vbNullString Then strSeparator = Mid$(FSO.BuildPath("a", "b"), 2, 1)
+    PathSep = strSeparator
+End Function
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : BuildPath2
+' Author    : Adam Waller
+' Date      : 3/3/2021
+' Purpose   : Like FSO.BuildPath, but with unlimited arguments)
+'---------------------------------------------------------------------------------------
+'
+Public Function BuildPath2(ParamArray Segments())
+    Dim lngPart As Long
+    With New clsConcat
+        For lngPart = LBound(Segments) To UBound(Segments)
+            .Add CStr(Segments(lngPart))
+            If lngPart < UBound(Segments) Then .Add PathSep
+        Next lngPart
+    BuildPath2 = .GetStr
+    End With
+End Function
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : Nz2
+' Author    : Adam Waller
+' Date      : 2/18/2021
+' Purpose   : Extend the NZ function to also include 0 or empty string.
+'---------------------------------------------------------------------------------------
+'
+Public Function Nz2(varValue, Optional varIfNull) As Variant
+    Select Case varValue
+        Case vbNullString, 0
+            If IsMissing(varIfNull) Then
+                Nz2 = vbNullString
+            Else
+                Nz2 = varIfNull
+            End If
+        Case Else
+            If IsNull(varValue) Then
+                Nz2 = varIfNull
+            Else
+                Nz2 = varValue
+            End If
+    End Select
 End Function

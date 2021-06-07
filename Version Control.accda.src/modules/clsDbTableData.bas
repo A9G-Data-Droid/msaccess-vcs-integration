@@ -36,21 +36,21 @@ Private Sub IDbComponent_Export()
     Dim strFile As String
     Dim intFormat As eTableDataExportFormat
 
-    ' Make sure the path exists.
-    VerifyPath FSO.GetParentFolderName(IDbComponent_SourceFile)
-
     ' Save as selected format, and remove other formats if they exist.
     For intFormat = 1 To eTableDataExportFormat.[_Last]
         ' Build file name for this format
         strFile = IDbComponent_BaseFolder & GetSafeFileName(m_Table.Name) & "." & GetExtByFormat(intFormat)
-        If FSO.FileExists(strFile) Then Kill strFile
+        If FSO.FileExists(strFile) Then DeleteFile strFile, True
         If intFormat = Me.Format Then
             ' Export the table using this format.
             Select Case intFormat
                 Case etdTabDelimited:   ExportTableDataAsTDF m_Table.Name
                 Case etdXML
-                    ' Export data rows as XML
+                    ' Export data rows as XML (encoding default is UTF-8)
+                    VerifyPath strFile
+                    Perf.OperationStart "App.ExportXML()"
                     Application.ExportXML acExportTable, m_Table.Name, strFile
+                    Perf.OperationEnd
                     SanitizeXML strFile, Options
             End Select
         End If
@@ -122,7 +122,7 @@ Private Sub ImportTableDataTDF(strFile As String)
     Dim fld As DAO.Field
     Dim dbs As DAO.Database
     Dim rst As DAO.Recordset
-    Dim stm As Scripting.TextStream
+    Dim stm As ADODB.Stream
     Dim strLine As String
     Dim varLine As Variant
     Dim varHeader As Variant
@@ -139,15 +139,24 @@ Private Sub ImportTableDataTDF(strFile As String)
     Next fld
     
     ' Clear any existing records before importing this data.
-    dbs.Execute "delete from " & strTable, dbFailOnError
+    dbs.Execute "delete from [" & strTable & "]", dbFailOnError
     Set rst = dbs.OpenRecordset(strTable)
     
     ' Read file line by line
-    Set stm = FSO.OpenTextFile(strFile)
-    Set rst = dbs.OpenRecordset(strTable)
-    Do While Not stm.AtEndOfStream
-        strLine = stm.ReadLine
+    Set stm = New ADODB.Stream
+    With stm
+        .Charset = "utf-8"
+        .Open
+        .LoadFromFile strFile
+    End With
+    
+    ' Loop through lines in file
+    Do While Not stm.EOS
+        strLine = stm.ReadText(adReadLine)
+        ' See if the header has already been parsed.
         If Not IsArray(varHeader) Then
+            ' Skip past any UTF-8 BOM header
+            If Left$(strLine, 3) = UTF8_BOM Then strLine = Mid$(strLine, 4)
             ' Read header line
             varHeader = Split(strLine, vbTab)
         Else
@@ -158,15 +167,29 @@ Private Sub ImportTableDataTDF(strFile As String)
                 For intCol = 0 To UBound(varHeader)
                     ' Check to see if field exists in the table
                     If dCols.Exists(varHeader(intCol)) Then
-                        ' Perform any needed replacements
-                        strValue = MultiReplace(CStr(varLine(intCol)), _
-                            "\\", "\", "\r\n", vbCrLf, "\r", vbCr, "\n", vbLf, "\t", vbTab)
-                        If strValue <> CStr(varLine(intCol)) Then
-                            ' Use replaced string value
-                            rst.Fields(varHeader(intCol)).Value = strValue
+                        ' Check for empty string or null.
+                        If varLine(intCol) = vbNullString Then
+                            ' The field could have a default value, but the imported
+                            ' data may still be a null value.
+                            If Not IsNull(rst.Fields(varHeader(intCol)).Value) Then
+                                ' Could possibly hit a problem with the storage of
+                                ' zero length strings instead of nulls. Since we can't
+                                ' really differentiate between these in a TDF file,
+                                ' we will go with NULL for now.
+                                'rst.Fields(varHeader(intCol)).AllowZeroLength
+                                rst.Fields(varHeader(intCol)).Value = Null
+                            End If
                         Else
-                            ' Use variant value without the string conversion
-                            rst.Fields(varHeader(intCol)).Value = varLine(intCol)
+                            ' Perform any needed replacements
+                            strValue = MultiReplace(CStr(varLine(intCol)), _
+                                "\\", "\", "\r\n", vbCrLf, "\r", vbCr, "\n", vbLf, "\t", vbTab)
+                            If strValue <> CStr(varLine(intCol)) Then
+                                ' Use replaced string value
+                                rst.Fields(varHeader(intCol)).Value = strValue
+                            Else
+                                ' Use variant value without the string conversion
+                                rst.Fields(varHeader(intCol)).Value = varLine(intCol)
+                            End If
                         End If
                     End If
                 Next intCol
@@ -207,9 +230,7 @@ Private Function GetTableExportSql(strTable As String) As String
     ' Build list of fields
     With cFieldList
         For Each fld In tdf.Fields
-            .Add "["
-            .Add fld.Name
-            .Add "]"
+            .Add "[", fld.Name, "]"
             intCnt = intCnt + 1
             If intCnt < intFields Then .Add ", "
         Next fld
@@ -217,11 +238,8 @@ Private Function GetTableExportSql(strTable As String) As String
 
     ' Build select statement
     With cText
-        .Add "SELECT "
-        .Add cFieldList.GetStr
-        .Add " FROM ["
-        .Add strTable
-        .Add "] ORDER BY "
+        .Add "SELECT ", cFieldList.GetStr
+        .Add " FROM [", strTable, "] ORDER BY "
         .Add cFieldList.GetStr
     End With
 
@@ -232,24 +250,57 @@ End Function
 
 '---------------------------------------------------------------------------------------
 ' Procedure : Import
-' Author    : Adam Waller
-' Date      : 4/23/2020
+' Author    : Adam Waller, Florian Jenn
+' Date      : 4/23/2020, 2020-10-26
 ' Purpose   : Import the table data from a file.
 '---------------------------------------------------------------------------------------
 '
 Private Sub IDbComponent_Import(strFile As String)
 
+    Dim blnUseTemp As Boolean
+    Dim strTempFile As String
     Dim strTable As String
 
     ' Import from different formats (XML is preferred for data integrity)
     Select Case GetFormatByExt(strFile)
         Case etdXML
             strTable = GetObjectNameFromFileName(strFile)
-            If TableExists(strTable) Then DoCmd.DeleteObject acTable, strTable
-            Application.ImportXML strFile, acStructureAndData
+            ' Make sure table exists before importing data to it.
+            If TableExists(strTable) Then
+                ' The ImportXML function does not properly handle UrlEncoded paths
+                blnUseTemp = (InStr(1, strFile, "%") > 0)
+                If blnUseTemp Then
+                    ' Import from (safe) temporary file name.
+                    strTempFile = GetTempFile
+                    FSO.CopyFile strFile, strTempFile
+                    Application.ImportXML strTempFile, acAppendData
+                    DeleteFile strTempFile
+                Else
+                    Application.ImportXML strFile, acAppendData
+                End If
+            Else
+                ' Warn user that table does not exist.
+                MsgBox2 "Table structure not found for '" & strTable & "'", _
+                    "The structure of a table should be created before importing data into it.", _
+                    "Please ensure that the table definition file exists in \tbldefs.", vbExclamation
+                Log.Add "WARNING: Table definition does not exist for '" & strTable & "'. This must be created before importing table data."
+            End If
         Case etdTabDelimited
             ImportTableDataTDF strFile
     End Select
+
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
 
 End Sub
 
@@ -261,7 +312,7 @@ End Sub
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
     
     Dim tbl As AccessObject
     Dim cTable As clsDbTableData
@@ -304,10 +355,10 @@ End Function
 '           : a couple different file extensions involved.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
     Dim colFiles As Collection
-    Set colFiles = GetFilePathsInFolder(IDbComponent_BaseFolder & "*." & GetExtByFormat(etdTabDelimited))
-    MergeCollection colFiles, GetFilePathsInFolder(IDbComponent_BaseFolder & "*." & GetExtByFormat(etdXML))
+    Set colFiles = GetFilePathsInFolder(IDbComponent_BaseFolder, "*." & GetExtByFormat(etdTabDelimited))
+    MergeCollection colFiles, GetFilePathsInFolder(IDbComponent_BaseFolder, "*." & GetExtByFormat(etdXML))
     Set IDbComponent_GetFileList = colFiles
 End Function
 
@@ -350,8 +401,21 @@ End Function
 '           : Note that alternate formats may stay here till the next export.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
     ClearOrphanedSourceFiles Me, "xml", "txt"
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+
 End Function
 
 
@@ -365,7 +429,8 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_DateModified() As Date
-    IDbComponent_DateModified = m_Table.DateModified
+    ' We cannot determine when *records* were modified in a table.
+    IDbComponent_DateModified = 0
 End Function
 
 
@@ -380,7 +445,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -392,7 +457,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "table data"
+    IDbComponent_Category = "Table Data"
 End Property
 
 
@@ -403,7 +468,7 @@ End Property
 ' Purpose   : Return the base folder for import/export of this component.
 '---------------------------------------------------------------------------------------
 Private Property Get IDbComponent_BaseFolder() As String
-    IDbComponent_BaseFolder = Options.GetExportFolder & "tables\"
+    IDbComponent_BaseFolder = Options.GetExportFolder & "tables" & PathSep
 End Property
 
 
@@ -438,8 +503,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -476,6 +541,7 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_SingleFile() As Boolean
+    IDbComponent_SingleFile = False
 End Property
 
 

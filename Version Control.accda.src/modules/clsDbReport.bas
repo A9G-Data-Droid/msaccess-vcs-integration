@@ -12,52 +12,9 @@ Attribute VB_Exposed = False
 Option Compare Database
 Option Explicit
 
-' See the following links for additional technical details regarding the DEVMODE strcture:
-' https://docs.microsoft.com/en-us/office/vba/api/access.report.prtdevmode
-' https://stackoverflow.com/questions/49560317/64-bit-word-vba-devmode-dmduplex-returns-4
-' http://toddmcdermid.blogspot.com/2009/02/microsoft-access-2003-and-printer.html
-
-Private Type str_DEVMODE
-    RGB As String * 220
-End Type
-
-Private Type type_DEVMODE
-    strDeviceName As String * 32
-    intSpecVersion As Integer
-    intDriverVersion As Integer
-    intSize As Integer
-    intDriverExtra As Integer
-    lngFields As Long
-    intOrientation As Integer
-    intPaperSize As Integer
-    intPaperLength As Integer
-    intPaperWidth As Integer
-    intScale As Integer
-    intCopies As Integer
-    intDefaultSource As Integer
-    intPrintQuality As Integer
-    intColor As Integer
-    intDuplex As Integer
-    intResolution As Integer
-    intTTOption As Integer
-    intCollate As Integer
-    strFormName As String * 32
-    intUnusedPadding As Integer
-    intBitsPerPel As Integer
-    lngPelsWidth As Long
-    lngPelsHeight As Long
-    lngDisplayFlags As Long
-    lngDisplayFrequency As Long
-    lngICMMethod As Long
-    lngICMIntent As Long
-    lngMediaType As Long
-    lngDitherType As Long
-    lngReserved1 As Long
-    lngReserved2 As Long
-End Type
-
 Private m_Report As AccessObject
 Private m_AllItems As Collection
+Private m_blnModifiedOnly As Boolean
 
 ' This requires us to use all the public methods and properties of the implemented class
 ' which keeps all the component classes consistent in how they are used in the export
@@ -74,97 +31,8 @@ Implements IDbComponent
 '---------------------------------------------------------------------------------------
 '
 Private Sub IDbComponent_Export()
-
-    ' Export main report object
-    SaveComponentAsText acReport, m_Report.Name, IDbComponent_SourceFile
-    
-    ' Export print vars if selected
-    If Options.SavePrintVars Then
-        ExportPrintVars m_Report.Name, GetPrintVarsFileName(m_Report.Name)
-    End If
-    
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : ExportPrintVars
-' Author    : Adam Waller
-' Date      : 1/25/2019
-' Purpose   : Exports print vars for reports
-'           : https://docs.microsoft.com/en-us/office/vba/api/access.report.prtdevmode
-'---------------------------------------------------------------------------------------
-'
-Public Sub ExportPrintVars(strReport As String, strFile As String)
-
-    Dim DevModeString As str_DEVMODE
-    Dim DevModeExtra As String
-    Dim DM As type_DEVMODE
-    Dim rpt As Report
-    Dim dItems As Scripting.Dictionary
-
-    'report must be open to access Report object
-    'report must be opened in design view to save changes to the print vars
-    Application.Echo False
-    DoCmd.OpenReport strReport, acViewDesign
-    Set rpt = Reports(strReport)
-    rpt.Visible = False
-
-    ' Make sure we don't have a null devmode
-    If Not IsNull(rpt.PrtDevMode) Then
-
-        ' Read report devmode into structure and convert to dictionary
-        DevModeExtra = rpt.PrtDevMode
-        DevModeString.RGB = DevModeExtra
-        LSet DM = DevModeString
-        Set dItems = DevModeToDictionary(DM)
-
-        ' Write output to file
-        WriteJsonFile Me, dItems, strFile, "Report Print Settings"
-
-    Else
-        ' DevMode was null
-        Log.Add "  Warning: PrtDevMode is null"
-    End If
-
-    ' Clean up
-    Set rpt = Nothing
-    DoCmd.Close acReport, strReport, acSaveNo
-    Application.Echo True
-
-End Sub
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : ImportPrintVars
-' Author    : Adam Waller
-' Date      : 5/7/2020
-' Purpose   : Import the print vars back into the report.
-'---------------------------------------------------------------------------------------
-'
-Public Sub ImportPrintVars(strFile As String)
-    
-'    Dim DevModeString As str_DEVMODE
-'    Dim tDevMode As type_DEVMODE
-'    Dim DevModeExtra As String
-'    Dim dFile As Dictionary
-'    Dim strReport As String
-'
-'    Set dFile = ReadJsonFile(strFile)
-'    If Not dFile Is Nothing Then
-'
-'        ' Prepare data structures
-'        tDevMode = DictionaryToDevMode(dFile("Items"))
-'        LSet DevModeString = tDevMode
-'        Mid(DevModeExtra, 1, 94) = DevModeString.RGB
-'
-'        ' Apply to report
-'        strReport = GetObjectNameFromFileName(strFile)
-'        DoCmd.Echo False
-'        DoCmd.OpenReport strReport, acViewDesign
-'        Reports(strReport).PrtDevMode = DevModeExtra
-'        DoCmd.Close acReport, strReport, acSaveYes
-'    End If
-    
+    SaveComponentAsText acReport, m_Report.Name, IDbComponent_SourceFile, Me
+    VCSIndex.Update Me, eatExport, GetCodeModuleHash(IDbComponent_ComponentType, m_Report.Name)
 End Sub
 
 
@@ -176,18 +44,30 @@ End Sub
 '---------------------------------------------------------------------------------------
 '
 Private Sub IDbComponent_Import(strFile As String)
+
+    Dim strName As String
     
-    Dim strReport As String
-    
-    ' Import the report object
-    strReport = GetObjectNameFromFileName(strFile)
-    LoadComponentFromText acReport, strReport, strFile
-    
-    ' Import the print vars if specified
-    If Options.SavePrintVars Then
-        ImportPrintVars GetPrintVarsFileName(strReport)
-    End If
-    
+    ' Only import files with the correct extension.
+    If Not strFile Like "*.bas" Then Exit Sub
+
+    strName = GetObjectNameFromFileName(strFile)
+    LoadComponentFromText acReport, strName, strFile, Me
+    Set m_Report = CurrentProject.AllReports(strName)
+    VCSIndex.Update Me, eatImport, GetCodeModuleHash(IDbComponent_ComponentType, strName)
+
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : Merge
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Merge the source file into the existing database, updating or replacing
+'           : any existing object.
+'---------------------------------------------------------------------------------------
+'
+Private Sub IDbComponent_Merge(strFile As String)
+
 End Sub
 
 
@@ -198,127 +78,29 @@ End Sub
 ' Purpose   : Return a collection of class objects represented by this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetAllFromDB() As Collection
-    
+Private Function IDbComponent_GetAllFromDB(Optional blnModifiedOnly As Boolean = False) As Collection
+
     Dim rpt As AccessObject
     Dim cReport As IDbComponent
 
     ' Build collection if not already cached
-    If m_AllItems Is Nothing Then
+    If m_AllItems Is Nothing Or (blnModifiedOnly <> m_blnModifiedOnly) Then
         Set m_AllItems = New Collection
+        m_blnModifiedOnly = blnModifiedOnly
         For Each rpt In CurrentProject.AllReports
             Set cReport = New clsDbReport
             Set cReport.DbObject = rpt
-            m_AllItems.Add cReport, rpt.Name
+            If blnModifiedOnly Then
+                If cReport.IsModified Then m_AllItems.Add cReport, rpt.Name
+            Else
+                m_AllItems.Add cReport, rpt.Name
+            End If
         Next rpt
     End If
 
     ' Return cached collection
     Set IDbComponent_GetAllFromDB = m_AllItems
-        
-End Function
 
-
-'---------------------------------------------------------------------------------------
-' Procedure : DevModeToDictionary
-' Author    : Adam Waller
-' Date      : 5/7/2020
-' Purpose   : Convert a DEVMODE type to a dictionary.
-'---------------------------------------------------------------------------------------
-'
-Private Function DevModeToDictionary(cDev As type_DEVMODE) As Dictionary
-    Set DevModeToDictionary = New Dictionary
-    With DevModeToDictionary
-        .Add "DeviceName", cDev.strDeviceName
-        .Add "SpecVersion", cDev.intSpecVersion
-        .Add "DriverVersion", cDev.intDriverVersion
-        .Add "Size", cDev.intSize
-        .Add "DriverExtra", cDev.intDriverExtra
-        .Add "Fields", cDev.lngFields
-        .Add "Orientation", cDev.intOrientation
-        .Add "PaperSize", cDev.intPaperSize
-        .Add "PaperLength", cDev.intPaperLength
-        .Add "PaperWidth", cDev.intPaperWidth
-        .Add "Scale", cDev.intScale
-        .Add "Copies", cDev.intCopies
-        .Add "DefaultSource", cDev.intDefaultSource
-        .Add "PrintQuality", cDev.intPrintQuality
-        .Add "Color", cDev.intColor
-        .Add "Duplex", cDev.intDuplex
-        .Add "Resolution", cDev.intResolution
-        .Add "TTOption", cDev.intTTOption
-        .Add "Collate", cDev.intCollate
-        .Add "FormName", cDev.strFormName
-        .Add "UnusedPadding", cDev.intUnusedPadding
-        .Add "BitsPerPel", cDev.intBitsPerPel
-        .Add "PelsWidth", cDev.lngPelsWidth
-        .Add "PelsHeight", cDev.lngPelsHeight
-        .Add "DisplayFlags", cDev.lngDisplayFlags
-        .Add "DisplayFrequency", cDev.lngDisplayFrequency
-        .Add "ICMMethod", cDev.lngICMMethod
-        .Add "ICMIntent", cDev.lngICMIntent
-        .Add "MediaType", cDev.lngMediaType
-        .Add "DitherType", cDev.lngDitherType
-        .Add "Reserved1", cDev.lngReserved1
-        .Add "Reserved2", cDev.lngReserved2
-    End With
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : DictionaryToDevMode
-' Author    : Adam Waller
-' Date      : 5/7/2020
-' Purpose   : Excel formulas make it easy to edit these!
-'---------------------------------------------------------------------------------------
-'
-Private Function DictionaryToDevMode(dDevMode As Dictionary) As type_DEVMODE
-    With DictionaryToDevMode
-        .strDeviceName = dDevMode("DeviceName")
-        .intSpecVersion = dDevMode("SpecVersion")
-        .intDriverVersion = dDevMode("DriverVersion")
-        .intSize = dDevMode("Size")
-        .intDriverExtra = dDevMode("DriverExtra")
-        .lngFields = dDevMode("Fields")
-        .intOrientation = dDevMode("Orientation")
-        .intPaperSize = dDevMode("PaperSize")
-        .intPaperLength = dDevMode("PaperLength")
-        .intPaperWidth = dDevMode("PaperWidth")
-        .intScale = dDevMode("Scale")
-        .intCopies = dDevMode("Copies")
-        .intDefaultSource = dDevMode("DefaultSource")
-        .intPrintQuality = dDevMode("PrintQuality")
-        .intColor = dDevMode("Color")
-        .intDuplex = dDevMode("Duplex")
-        .intResolution = dDevMode("Resolution")
-        .intTTOption = dDevMode("TTOption")
-        .intCollate = dDevMode("Collate")
-        .strFormName = dDevMode("FormName")
-        .intUnusedPadding = dDevMode("UnusedPadding")
-        .intBitsPerPel = dDevMode("BitsPerPel")
-        .lngPelsWidth = dDevMode("PelsWidth")
-        .lngPelsHeight = dDevMode("PelsHeight")
-        .lngDisplayFlags = dDevMode("DisplayFlags")
-        .lngDisplayFrequency = dDevMode("DisplayFrequency")
-        .lngICMMethod = dDevMode("ICMMethod")
-        .lngICMIntent = dDevMode("ICMIntent")
-        .lngMediaType = dDevMode("MediaType")
-        .lngDitherType = dDevMode("DitherType")
-        .lngReserved1 = dDevMode("Reserved1")
-        .lngReserved2 = dDevMode("Reserved2")
-    End With
-End Function
-
-
-'---------------------------------------------------------------------------------------
-' Procedure : GetPrintVarsFileName
-' Author    : Adam Waller
-' Date      : 5/7/2020
-' Purpose   : Return the file name used to export/import print vars
-'---------------------------------------------------------------------------------------
-'
-Private Function GetPrintVarsFileName(strReport As String) As String
-    GetPrintVarsFileName = IDbComponent_BaseFolder & GetSafeFileName(strReport) & ".json"
 End Function
 
 
@@ -329,8 +111,8 @@ End Function
 ' Purpose   : Return a list of file names to import for this component type.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_GetFileList() As Collection
-    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder & "*.bas")
+Private Function IDbComponent_GetFileList(Optional blnModifiedOnly As Boolean = False) As Collection
+    Set IDbComponent_GetFileList = GetFilePathsInFolder(IDbComponent_BaseFolder, "*.bas")
 End Function
 
 
@@ -341,10 +123,34 @@ End Function
 ' Purpose   : Remove any source files for objects not in the current database.
 '---------------------------------------------------------------------------------------
 '
-Private Function IDbComponent_ClearOrphanedSourceFiles() As Variant
+Private Sub IDbComponent_ClearOrphanedSourceFiles()
     ClearFilesByExtension IDbComponent_BaseFolder, "pv"
     If Not Options.SavePrintVars Then ClearFilesByExtension IDbComponent_BaseFolder, "json"
     ClearOrphanedSourceFiles Me, "bas", "json"
+End Sub
+
+
+'---------------------------------------------------------------------------------------
+' Procedure : IsModified
+' Author    : Adam Waller
+' Date      : 11/21/2020
+' Purpose   : Returns true if the object in the database has been modified since
+'           : the last export of the object.
+'---------------------------------------------------------------------------------------
+'
+Public Function IDbComponent_IsModified() As Boolean
+    
+    ' Item is considered modified unless proven otherwise.
+    IDbComponent_IsModified = True
+    
+    ' Check the modified date first.
+    ' (This may not reflect some code changes)
+    If m_Report.DateModified <= VCSIndex.GetExportDate(Me) Then
+            
+        ' Date is okay, check hash
+        IDbComponent_IsModified = VCSIndex.Item(Me)("Hash") <> GetCodeModuleHash(IDbComponent_ComponentType, m_Report.Name)
+    End If
+    
 End Function
 
 
@@ -373,7 +179,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Function IDbComponent_SourceModified() As Date
-    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = FileDateTime(IDbComponent_SourceFile)
+    If FSO.FileExists(IDbComponent_SourceFile) Then IDbComponent_SourceModified = GetLastModifiedDate(IDbComponent_SourceFile)
 End Function
 
 
@@ -385,7 +191,7 @@ End Function
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_Category() As String
-    IDbComponent_Category = "reports"
+    IDbComponent_Category = "Reports"
 End Property
 
 
@@ -396,7 +202,7 @@ End Property
 ' Purpose   : Return the base folder for import/export of this component.
 '---------------------------------------------------------------------------------------
 Private Property Get IDbComponent_BaseFolder() As String
-    IDbComponent_BaseFolder = Options.GetExportFolder & "reports\"
+    IDbComponent_BaseFolder = Options.GetExportFolder & "reports" & PathSep
 End Property
 
 
@@ -431,8 +237,8 @@ End Property
 ' Purpose   : Return a count of how many items are in this category.
 '---------------------------------------------------------------------------------------
 '
-Private Property Get IDbComponent_Count() As Long
-    IDbComponent_Count = IDbComponent_GetAllFromDB.Count
+Private Property Get IDbComponent_Count(Optional blnModifiedOnly As Boolean = False) As Long
+    IDbComponent_Count = IDbComponent_GetAllFromDB(blnModifiedOnly).Count
 End Property
 
 
@@ -484,6 +290,7 @@ End Property
 '---------------------------------------------------------------------------------------
 '
 Private Property Get IDbComponent_SingleFile() As Boolean
+    IDbComponent_SingleFile = False
 End Property
 
 
