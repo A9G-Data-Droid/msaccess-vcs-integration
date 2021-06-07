@@ -169,6 +169,7 @@ Public Sub SanitizeFile(strPath As String)
                         ' Ignore Checksum lines, since they will change.
                         SkipLine lngLine
                     ElseIf StartsWith(strTLine, "BaseInfo =") Then
+                        SkipLine lngLine
                         ' BaseInfo is used with combo boxes, similar to RowSource.
                         ' Since the value could span multiple lines, we need to
                         ' check the indent level of the following lines to see how
